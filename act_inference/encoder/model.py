@@ -1,14 +1,15 @@
 import torch
-from components.detr_vae import build_ACT_encoder
+from torch import nn
+from components.detr_vae import ACT_vision_encoder
 
 class act_encoder(nn.Module):
 
     def __init__(
-        self,
+        self, args
     ):
         super().__init__()
-        self.encoder = build_ACT_encoder()
+        self.encoder = ACT_vision_encoder(args)
 
-    def forward(self, x):
-        x = self.encoder(x)
-        return x
+    def forward(self, qpos, camera_imgs):
+        src, pos, latent_input, proprio_input = self.encoder(qpos, camera_imgs)
+        return src, pos, latent_input, proprio_input

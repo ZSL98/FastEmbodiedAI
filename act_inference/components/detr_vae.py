@@ -225,6 +225,59 @@ def build_encoder(args):
 
     return encoder
 
+class ACT_model(nn.Module):
+
+    def __init__(self, args):
+        super().__init__()
+        self.transformer = build_transformer(args)
+        self.query_embed = nn.Embedding(args.num_queries, args.hidden_dim)
+        self.additional_pos_embed = nn.Embedding(2, args.hidden_dim) # learned position embedding for proprio and latent
+
+    def forward(self, src, pos, latent_input, proprio_input):
+        print('self.additional_pos_embed.weight:', self.additional_pos_embed.weight.shape)
+        hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight)[0]
+        print('hs: ', hs.shape)
+        return hs
+
+class ACT_vision_encoder(nn.Module):
+
+    def __init__(self, args):
+        super().__init__()
+        self.latent_dim = 32
+        self.camera_names = args.camera_names
+
+        backbones = []
+        backbone = build_backbone(args)
+        backbones.append(backbone)
+        self.input_proj = nn.Conv2d(backbones[0].num_channels, args.hidden_dim, kernel_size=1)
+        self.backbones = nn.ModuleList(backbones)
+        self.input_proj_robot_state = nn.Linear(14, args.hidden_dim)
+        self.latent_out_proj = nn.Linear(self.latent_dim, args.hidden_dim) # project latent sample to embedding
+
+
+    def forward(self, qpos, image):
+        mu = logvar = None
+        bs, _ = qpos.shape
+        latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32).to(qpos.device)
+        latent_input = self.latent_out_proj(latent_sample)
+
+        # Image observation features and position embeddings
+        all_cam_features = []
+        all_cam_pos = []
+        for cam_id in range(4): # HARDCODED (the count of cameras)
+            features, pos = self.backbones[0](image[:, cam_id]) # HARDCODED
+            features = features[0] # take the last layer feature
+            pos = pos[0]
+            all_cam_features.append(self.input_proj(features))
+            all_cam_pos.append(pos)
+        # proprioception features
+        proprio_input = self.input_proj_robot_state(qpos)
+        # fold camera dimension into width dimension
+        src = torch.cat(all_cam_features, axis=3)
+        pos = torch.cat(all_cam_pos, axis=3)
+
+        return src, pos, latent_input, proprio_input
+
 
 def build(args):
     state_dim = 14 # TODO hardcode

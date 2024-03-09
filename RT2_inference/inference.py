@@ -16,7 +16,10 @@ class RT2_engine:
         img = torch.randn(1, 3, 256, 256).to("cuda")
         context = torch.randn(1, 64, 512).to("cuda")
         single_token = torch.randint(0, 20000, (1, 1)).to("cuda")
-        self.caches = [text, img, context, single_token]
+        self.caches = { 'text': text,
+                        'img': img,
+                        'context': context,
+                        'single_token': single_token}
 
         # prepare models
         vit = vision_transformer().to("cuda")
@@ -38,30 +41,30 @@ class RT2_engine:
         # [BUG]: I have to run the following command once to make the cuda graph generated properly
         # [FIXME]: The output caches of the graphs have not been designed yet
         # [FIXME]: The decode phase is static, which is just an approximate
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches[0], 
+        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
                                                             seq_len = text_max_seq_len, 
-                                                            context = self.caches[2], 
+                                                            context = self.caches['context'], 
                                                             kv_cache = None)
         with torch.cuda.graph(self.cuda_graphs['prefill'], **recording_kwargs):
-            out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches[0], 
+            out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
                                                                 seq_len = text_max_seq_len, 
-                                                                context = self.caches[2], 
+                                                                context = self.caches['context'], 
                                                                 kv_cache = None)
         self.cuda_graphs['prefill'].replay()
         torch.cuda.synchronize()
 
         ## Make cuda graph for the decode phase
         with torch.cuda.graph(self.cuda_graphs['decode'], **recording_kwargs):
-            out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches[3], 
+            out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
                                                                 seq_len = text_max_seq_len, 
-                                                                context = self.caches[2], 
+                                                                context = self.caches['context'], 
                                                                 kv_cache = new_cache)
         self.cuda_graphs['decode'].replay()
         torch.cuda.synchronize()
 
         ## Make cuda graph for the vision encoder
         with torch.cuda.graph(self.cuda_graphs['encode'], **recording_kwargs):
-            out = self.models['vit'](self.caches[1])
+            out = self.models['vit'](self.caches['img'])
         self.cuda_graphs['encode'].replay()
         torch.cuda.synchronize()
 

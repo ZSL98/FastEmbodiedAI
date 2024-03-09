@@ -1,14 +1,15 @@
 import torch
-from components.detr_vae import build_ACT_model
+from torch import nn
+from components.detr_vae import ACT_model
 
 class act_decoder(nn.Module):
 
     def __init__(
-        self,
+        self, args
     ):
         super().__init__()
-        self.decoder = build_ACT_model()
+        self.decoder = ACT_model(args)
 
-    def forward(self, x):
-        x = self.decoder(x)
-        return x
+    def forward(self, src, pos, latent_input, proprio_input):
+        out = self.decoder(src, pos, latent_input, proprio_input)
+        return out
