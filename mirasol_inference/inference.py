@@ -5,16 +5,13 @@ import torch.multiprocessing as mp
 import torch.cuda.profiler as profiler
 from cuda import cuda, cudart
 from torch.multiprocessing import Process, Value, Array
-
 import os
-import sys
-sys.path.append("../../../repos/x-transformers")
 
-from encoder0.vision_encoder import vision_encoder
-from encoder0.audio_encoder import audio_encoder
-from encoder1.combiner import combiner
-from llm.encoder import mirasol_encoder
-from llm.decoder import mirasol_decoder
+from .encoder0.vision_encoder import vision_encoder
+from .encoder0.audio_encoder import audio_encoder
+from .encoder1.combiner import combiner
+from .llm.encoder import mirasol_encoder
+from .llm.decoder import mirasol_decoder
 
 from beartype import beartype
 from beartype.typing import Optional, Union, Tuple, Dict, Any
@@ -204,6 +201,9 @@ class Mirasol_engine:
                        'decode': torch.cuda.CUDAGraph()}
         self.generate_cuda_graphs()
 
+        # prepare some streams to use
+        self.streams = [torch.cuda.Stream() for _ in range(18)]
+
     def generate_cuda_graphs(self):
 
         ## prepare cuda graphs for models
@@ -317,20 +317,23 @@ class Mirasol_engine:
         elapsed_time = end_time - start_time
         print(f"graph_V_exec Elapsed Time: {elapsed_time} seconds")
 
+    def run_V_cuda_graphs(self, num_trails=1, required_sync=True):
+        for i in range(num_trails):
+            self.graphs['vision'].replay()
+            self.graphs['audio'].replay()
+            self.graphs['combiner'].replay()
+            self.graphs['encoder'].replay()
+            if required_sync:
+                torch.cuda.synchronize()
 
-    def run_V_cuda_graphs(self):
-        self.graphs['vision'].replay()
-        self.graphs['audio'].replay()
-        self.graphs['combiner'].replay()
-        self.graphs['encoder'].replay()
-        torch.cuda.synchronize()
 
-
-    def run_L_cuda_graphs(self, out_seq_len=64):
-        self.graphs['prefill'].replay()
-        for token in range(out_seq_len-1):
-            self.graphs['decode'].replay()       
-            torch.cuda.synchronize()
+    def run_L_cuda_graphs(self, num_trails=1, out_seq_len=64, required_sync=True):
+        for i in range(num_trails):
+            self.graphs['prefill'].replay()
+            for token in range(out_seq_len-1):
+                self.graphs['decode'].replay()
+                if required_sync:
+                    torch.cuda.synchronize()
 
 
     def run_V_pipeline_basic(self):
@@ -403,15 +406,16 @@ class Mirasol_engine:
         torch.cuda.synchronize()
 
 
-    def run_VL_mp(self, use_cuda_graphs=True):
-        # [FIXME]: This function not tested yet
-        round_id = mp.Queue()
+    def run_VL_mp(self, use_cuda_graphs=True, num_trails=1):
+        # [BUG]: This function is not working
+        # round_id = mp.Queue()
+        # mp.set_start_method('spawn')
         if use_cuda_graphs:
-            V_process = Process(target=self.run_V_cuda_graphs,  args=(round_id, models, caches, double_caches))
-            LA_process = Process(target=self.run_L_cuda_graphs, args=(round_id, models, caches, double_caches))
+            V_process = Process(target=self.run_V_cuda_graphs, args=(self, num_trails))
+            LA_process = Process(target=self.run_L_cuda_graphs, args=(self, num_trails))
         else:
-            V_process = Process(target=self.run_V_basic,  args=(round_id, models, caches, double_caches))
-            LA_process = Process(target=self.run_L_basic, args=(round_id, models, caches, double_caches))
+            V_process = Process(target=self.run_V_basic, args=(self, num_trails))
+            LA_process = Process(target=self.run_L_basic, args=(self, num_trails))
 
         processes = [V_process, LA_process]
         for process in processes:
@@ -419,6 +423,12 @@ class Mirasol_engine:
 
         for process in processes:
             process.join()
+
+    def run_VL_ms(self, num_trails):
+        with torch.cuda.stream(self.streams[0]):
+            self.run_V_cuda_graphs(num_trails=num_trails, required_sync=False)
+        with torch.cuda.stream(self.streams[1]):
+            self.run_L_cuda_graphs(num_trails=num_trails, required_sync=False)
 
     def run_all_in_mp(self):
         # [FIXME]: This function not tested yet
@@ -457,10 +467,32 @@ class Mirasol_engine:
         torch.cuda.synchronize()
         print(f"Time for 10 timesteps: {elapsed_time} seconds")
 
+
+    def run_ts(self, task_plan):
+        stream_id = 0
+        for stage in task_plan:
+            if stage == 'e':
+                with torch.cuda.stream(self.streams[stream_id]):
+                    self.graphs['vision'].replay()
+                    self.graphs['audio'].replay()
+                    self.graphs['combiner'].replay()
+                    self.graphs['encoder'].replay()
+            elif stage == 'p':
+                with torch.cuda.stream(self.streams[stream_id]):
+                    self.graphs['prefill'].replay()
+            elif stage == 'd':
+                with torch.cuda.stream(self.streams[stream_id]):
+                    self.graphs['decode'].replay()
+            
+            stream_id = stream_id + 1
+
+
     def run_benchmarks(self,
                        mode: str,
                        use_cuda_graphs: bool,
-                       num_trails: int):
+                       num_trails: int,
+                       sche_plan
+                       ):
         if mode == 'seq' and use_cuda_graphs:
             for i in range(num_trails):
                 self.run_V_cuda_graphs()
@@ -471,26 +503,56 @@ class Mirasol_engine:
                 self.run_V_basic()
                 self.run_L_basic()
         elif mode == 'pipeline':
-            self.run_VL_mp(use_cuda_graphs)
+            # self.run_VL_mp(use_cuda_graphs, num_trails)
+            self.run_VL_ms(num_trails=num_trails)
+        elif mode == 'profile':
+            warmup_iter = 20
+            test_iter = 10
+            sche_duration = {}
+            for task_plan in sche_plan:
+                for i in range(warmup_iter):
+                    self.run_ts(task_plan)
+                torch.cuda.synchronize()
+                # Time the ts duration
+                start_time = time.time()
+                for i in range(test_iter):
+                    self.run_ts(task_plan)
+                torch.cuda.synchronize()
+
+                task_duration = (time.time() - start_time) * 1000 / test_iter
+                sche_duration[task_plan] = task_duration
+            return sche_duration
 
 
-
-if __name__ == "__main__":
-
+def mirasol_run(sche_plan = None):
     print("Start Mirasol inference...")
 
-    e = Mirasol_engine()
+    torch.cuda.set_device(0)
+    e = Mirasol_engine(DIM=512)
     profiler.start()
-    e.run_benchmarks(mode='seq',
-                     use_cuda_graphs=True,
-                     num_trails=100)
+    if sche_plan is None:
+        e.run_benchmarks(mode='pipeline',
+                         use_cuda_graphs=True,
+                         num_trails=100)
+    else:
+        res = e.run_benchmarks(mode='profile',
+                               use_cuda_graphs=True,
+                               num_trails=100,
+                               sche_plan=sche_plan)
     torch.cuda.synchronize()
     profiler.stop()
 
+    print("Mirasol inference finished")
+    if res is not None:
+        return res
+
+
+if __name__ == "__main__":
+    mirasol_run()
     exit()
 
-    """
-    Below is the experimental code
+
+    # Below is the experimental code
     """
     mp.set_start_method('spawn')
     torch.cuda.set_device(0)
@@ -536,3 +598,4 @@ if __name__ == "__main__":
     graph_parallel_exec(models, caches, double_caches)
 
     print('Finished.')
+    """

@@ -32,6 +32,3 @@ class vision_encoder(nn.Module):
     def forward(self, x):
         x = self.video_encoder(x)
         return x
-
-
-

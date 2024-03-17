@@ -78,6 +78,15 @@ class RT2_engine:
     def run_basic(self, num_trails):
         pass
 
+    def run_benchmarks(self,
+                       mode: str,
+                       use_cuda_graphs: bool,
+                       num_trails: int):
+        if mode == 'seq' and use_cuda_graphs:
+            self.run_cuda_graphs(num_trails)
+        elif mode == 'pipeline':
+            pass
+
 
 def sequential_L_exec(llm):
 
@@ -99,7 +108,9 @@ if __name__ == "__main__":
     print("Start RT2 inference...")
 
     e = RT2_engine()
-    e.run_cuda_graphs(100)
+    e.run_benchmarks(mode='seq',
+                     use_cuda_graphs=True,
+                     num_trails=100)
 
     print("Finished.")
 
