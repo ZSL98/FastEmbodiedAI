@@ -6,6 +6,8 @@ import torch.cuda.profiler as profiler
 from cuda import cuda, cudart
 from torch.multiprocessing import Process, Value, Array
 import os
+import numpy as np
+import threading
 
 from .encoder0.vision_encoder import vision_encoder
 from .encoder0.audio_encoder import audio_encoder
@@ -430,6 +432,30 @@ class Mirasol_engine:
         with torch.cuda.stream(self.streams[1]):
             self.run_L_cuda_graphs(num_trails=num_trails, required_sync=False)
 
+    def run_single_request(self, durations, i):
+        stream_id = i%18
+        with torch.cuda.stream(self.streams[stream_id]):
+            start = time.time()
+            self.run_V_cuda_graphs(num_trails=1, required_sync=False)
+            self.run_L_cuda_graphs(num_trails=1, out_seq_len=14, required_sync=False)
+            self.streams[stream_id].synchronize()
+        durations.append(time.time() - start)
+
+    def run_parallel_req(self, num_trails, req_interval):
+        start = []
+        durations = []
+        threads = []
+        for i in range(num_trails):
+            time.sleep(req_interval)
+            thread = threading.Thread(target=self.run_single_request, args=(durations, i))
+            thread.start()
+            threads.append(thread)
+
+        for thread in threads:
+            thread.join()
+        
+        return durations
+
     def run_all_in_mp(self):
         # [FIXME]: This function not tested yet
         audio_tokens, video_tokens, text_tokens = caches
@@ -491,23 +517,28 @@ class Mirasol_engine:
                        mode: str,
                        use_cuda_graphs: bool,
                        num_trails: int,
-                       sche_plan
+                       sche_plan,
+                       req_interval
                        ):
         if mode == 'seq' and use_cuda_graphs:
+            durations = []
             for i in range(num_trails):
-                self.run_V_cuda_graphs()
-                self.run_L_cuda_graphs()
-                torch.cuda.synchronize()
+                self.run_single_request(durations, 0)
+            torch.cuda.synchronize()
+            print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
         elif mode == 'seq' and not use_cuda_graphs:
             for i in range(num_trails):
                 self.run_V_basic()
                 self.run_L_basic()
-        elif mode == 'pipeline':
+        elif mode == 'pipe':
             # self.run_VL_mp(use_cuda_graphs, num_trails)
             self.run_VL_ms(num_trails=num_trails)
+        elif mode == 'parallel':
+            durations = self.run_parallel_req(num_trails=num_trails, req_interval=req_interval)
+            print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
         elif mode == 'profile':
             warmup_iter = 20
-            test_iter = 10
+            test_iter = 100
             sche_duration = {}
             for task_plan in sche_plan:
                 for i in range(warmup_iter):
@@ -517,34 +548,38 @@ class Mirasol_engine:
                 start_time = time.time()
                 for i in range(test_iter):
                     self.run_ts(task_plan)
-                torch.cuda.synchronize()
+                    torch.cuda.synchronize()
 
                 task_duration = (time.time() - start_time) * 1000 / test_iter
                 sche_duration[task_plan] = task_duration
+                print(task_plan, task_duration)
             return sche_duration
 
 
-def mirasol_run(sche_plan = None):
+def mirasol_run(sche_plan=None, mode='profile', req_interval=0):
     print("Start Mirasol inference...")
 
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(1)
     e = Mirasol_engine(DIM=512)
+    res = None
     profiler.start()
     if sche_plan is None:
-        e.run_benchmarks(mode='pipeline',
+        e.run_benchmarks(mode=mode,
                          use_cuda_graphs=True,
-                         num_trails=100)
+                         num_trails=1000,
+                         sche_plan=None,
+                         req_interval=req_interval)
     else:
         res = e.run_benchmarks(mode='profile',
                                use_cuda_graphs=True,
                                num_trails=100,
-                               sche_plan=sche_plan)
+                               sche_plan=sche_plan,
+                               req_interval=0)
     torch.cuda.synchronize()
     profiler.stop()
 
     print("Mirasol inference finished")
-    if res is not None:
-        return res
+    return res
 
 
 if __name__ == "__main__":

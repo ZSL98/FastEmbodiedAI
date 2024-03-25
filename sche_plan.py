@@ -22,6 +22,11 @@ parser.add_argument('--simu_ts_len', default=20, help='Total ts len for simulati
 parser.add_argument('--real_run', default=False, help='If require to import torch', type=bool)
 parser.add_argument('--enable_recompute', default=False, help='If enable replace decode with prefill', type=bool)
 
+parser.add_argument('--mode', default='profile', help='mode', type=str)
+parser.add_argument('--req_interval', default=0, help='req_interval', type=float)
+
+# parser.add_argument('--kv_len', default=)
+
 class Query:
     def __init__(self, args, query_id):
         self.query_id = query_id
@@ -184,21 +189,28 @@ class SimuScheduler:
                         all_token_latency = all_token_latency + token_latency
             # print('all token latency: ', all_token_latency)
             all_query_token_latency = all_query_token_latency + all_token_latency
-            
+
         avg_query_token_latency = all_query_token_latency / query_num / out_seq_len
         avg_query_duration = sum(query_durations) / query_num
         print("Query duration: {:.2f} ms".format(avg_query_duration))
         print("Avg token latency: {:.2f} ms".format(avg_query_token_latency))
+        print("frame interval: {:.2f} ms".format(sum(ts_duration_all) / self.args.simu_ts_len * self.args.query_interval))
 
 if __name__ == "__main__":
     args = parser.parse_args()
     q_manager = SimuQueryManage(args)
     s = SimuScheduler(args, q_manager)
-    sche_plan = s.schedule()
+    if args.mode != "profile":
+        sche_plan = None
+    else:
+        sche_plan = s.schedule()
 
     if args.real_run:
         import x_transformers
         from mirasol_inference.inference import mirasol_run
+        from kernel_profile.flashinfer import flashinfer_decode
 
-        profile_data = mirasol_run(sche_plan = sche_plan)
-        s.data_analyze(sche_plan, profile_data)
+        flashinfer_decode(sche_plan = sche_plan)
+        profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode, req_interval=args.req_interval)
+        if sche_plan is not None:
+            s.data_analyze(sche_plan, profile_data)
