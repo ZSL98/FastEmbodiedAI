@@ -10,6 +10,8 @@ MAX_QUERY_TS = 1000
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--query_interval', default=2, help='The iterval of requests to come', type=int)
+parser.add_argument('--input_seq_len', default=128, help='input sequence length', type=int)
+
 parser.add_argument('--encoder_n', default=1, help='The number of ts that encoder takes', type=int)
 parser.add_argument('--prefill_n', default=1, help='The number of ts that prefill takes', type=int)
 parser.add_argument('--decode_n', default=1, help='The number of ts that decode takes', type=int)
@@ -25,7 +27,15 @@ parser.add_argument('--enable_recompute', default=False, help='If enable replace
 parser.add_argument('--mode', default='profile', help='mode', type=str)
 parser.add_argument('--req_interval', default=0, help='req_interval', type=float)
 
+## LLM transformer detail
+parser.add_argument('--dim', default=512, help='LLM transformer dimension', type=int)
+
+## profile arguments
+parser.add_argument('--warmup_num', default=20, help='warmup_num', type=int)
+parser.add_argument('--trail_num', default=100, help='trail_num', type=int)
+
 # parser.add_argument('--kv_len', default=)
+args = parser.parse_args()
 
 class Query:
     def __init__(self, args, query_id):
@@ -196,8 +206,7 @@ class SimuScheduler:
         print("Avg token latency: {:.2f} ms".format(avg_query_token_latency))
         print("frame interval: {:.2f} ms".format(sum(ts_duration_all) / self.args.simu_ts_len * self.args.query_interval))
 
-if __name__ == "__main__":
-    args = parser.parse_args()
+if __name__ == "__main__": 
     q_manager = SimuQueryManage(args)
     s = SimuScheduler(args, q_manager)
     if args.mode != "profile":
@@ -208,9 +217,10 @@ if __name__ == "__main__":
     if args.real_run:
         import x_transformers
         from mirasol_inference.inference import mirasol_run
-        from kernel_profile.flashinfer import flashinfer_decode
+        from kernel_profile.flashinfer.decode_test import flashinfer_decode
 
-        flashinfer_decode(sche_plan = sche_plan)
+        # flashinfer_decode(sche_plan = sche_plan)
+
         profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode, req_interval=args.req_interval)
         if sche_plan is not None:
             s.data_analyze(sche_plan, profile_data)

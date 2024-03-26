@@ -19,7 +19,7 @@ from beartype import beartype
 from beartype.typing import Optional, Union, Tuple, Dict, Any
 from einops import rearrange, repeat, reduce, pack, unpack
 from einops.layers.torch import Rearrange
-
+from sche_plan import args
 
 
 def audio_process(events, audio_tokens, audio_buffers, buffer_ids, audio_enc):
@@ -437,7 +437,7 @@ class Mirasol_engine:
         with torch.cuda.stream(self.streams[stream_id]):
             start = time.time()
             self.run_V_cuda_graphs(num_trails=1, required_sync=False)
-            self.run_L_cuda_graphs(num_trails=1, out_seq_len=14, required_sync=False)
+            self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
             self.streams[stream_id].synchronize()
         durations.append(time.time() - start)
 
@@ -560,7 +560,7 @@ def mirasol_run(sche_plan=None, mode='profile', req_interval=0):
     print("Start Mirasol inference...")
 
     torch.cuda.set_device(1)
-    e = Mirasol_engine(DIM=512)
+    e = Mirasol_engine(DIM=args.dim)
     res = None
     profiler.start()
     if sche_plan is None:
