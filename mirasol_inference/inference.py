@@ -159,10 +159,10 @@ class Mirasol_engine:
 
         # prepare caches for tensors
         text_tokens = torch.randint(0, 256, (1, 128)).to("cuda")
-        audio_tokens = torch.randn(1, 12, DIM).to("cuda")
-        video_tokens = torch.randn(1, 12, DIM).to("cuda")
-        av_embeddings = torch.randn(1, 3, DIM).to("cuda")
-        av_context = torch.randn(1, 18, DIM).to("cuda")
+        audio_tokens = torch.randn(1, 12, DIM).half().to("cuda")
+        video_tokens = torch.randn(1, 12, DIM).half().to("cuda")
+        av_embeddings = torch.randn(1, 3, DIM).half().to("cuda")
+        av_context = torch.randn(1, 18, DIM).half().to("cuda")
         single_token = torch.randint(0, 256, (1, 1)).to("cuda")
         self.caches = {'text': text_tokens, 
                        'single_token': single_token,
@@ -173,9 +173,9 @@ class Mirasol_engine:
                        }
 
         # Those are intermediate caches for small graphs
-        encoded_video = torch.randn(1, 1, 4, DIM).to("cuda")
-        encoded_audio = torch.randn(1, 1, 4, DIM).to("cuda")
-        combiner_out = torch.randn(1, 8, DIM).to("cuda")
+        encoded_video = torch.randn(1, 1, 4, DIM).half().to("cuda")
+        encoded_audio = torch.randn(1, 1, 4, DIM).half().to("cuda")
+        combiner_out = torch.randn(1, 8, DIM).half().to("cuda")
         self.extra_caches = {
             'enc_video': encoded_video,
             'enc_audio': encoded_audio,
@@ -183,11 +183,11 @@ class Mirasol_engine:
         }
 
         # prepare models
-        vision_enc = vision_encoder(dim=DIM).to("cuda")
-        audio_enc = audio_encoder(dim=DIM).to("cuda")
-        combiner_enc = combiner(dim=DIM).to("cuda")
-        encoder = mirasol_encoder(dim=DIM).to("cuda")
-        decoder = mirasol_decoder(dim=DIM).to("cuda")
+        vision_enc = vision_encoder(dim=DIM).half().to("cuda")
+        audio_enc = audio_encoder(dim=DIM).half().to("cuda")
+        combiner_enc = combiner(dim=DIM).half().to("cuda")
+        encoder = mirasol_encoder(dim=DIM).half().to("cuda")
+        decoder = mirasol_decoder(dim=DIM).half().to("cuda")
         self.models = {'vision_enc': vision_enc, 
                        'audio_enc': audio_enc, 
                        'combiner_enc': combiner_enc, 
@@ -235,12 +235,13 @@ class Mirasol_engine:
             combined_audio_video_tokens = self.extra_caches['combiner_out'][..., -3:, :]
             combined_audio_video_tokens = unpack(combined_audio_video_tokens, combine_ps, '* n d')[0]
             av_encoder_input = rearrange(combined_audio_video_tokens, 'b ... d -> b (...) d')
-            self.caches['av_context'] = self.models['encoder'](av_encoder_input)
+            self.caches['av_embeddings'] = self.models['encoder'](av_encoder_input)
         self.graphs['encoder'].replay()
 
         text_max_seq_len = 64
         ## Make cuda graph for the prefill phase
         kv_cache = None
+        # print("self.caches['av_context'] shape: ", self.caches['av_context'].shape)
         # out, new_cache = self.models['decoder'].wrapped_decoder.make_graph(text_tokens, seq_len = text_max_seq_len, context = av_context, kv_cache = kv_cache)
         with torch.cuda.graph(self.graphs['prefill'], **recording_kwargs):
             out, new_cache = self.models['decoder'].wrapped_decoder.make_graph(
@@ -526,31 +527,33 @@ class Mirasol_engine:
                 self.run_single_request(durations, 0)
             torch.cuda.synchronize()
             print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
+
         elif mode == 'seq' and not use_cuda_graphs:
             for i in range(num_trails):
                 self.run_V_basic()
                 self.run_L_basic()
+
         elif mode == 'pipe':
             # self.run_VL_mp(use_cuda_graphs, num_trails)
             self.run_VL_ms(num_trails=num_trails)
+
         elif mode == 'parallel':
             durations = self.run_parallel_req(num_trails=num_trails, req_interval=req_interval)
             print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
+
         elif mode == 'profile':
-            warmup_iter = 20
-            test_iter = 100
             sche_duration = {}
             for task_plan in sche_plan:
-                for i in range(warmup_iter):
+                for i in range(args.warmup_num):
                     self.run_ts(task_plan)
                 torch.cuda.synchronize()
                 # Time the ts duration
                 start_time = time.time()
-                for i in range(test_iter):
+                for i in range(args.trail_num):
                     self.run_ts(task_plan)
                     torch.cuda.synchronize()
 
-                task_duration = (time.time() - start_time) * 1000 / test_iter
+                task_duration = (time.time() - start_time) * 1000 / args.trail_num
                 sche_duration[task_plan] = task_duration
                 print(task_plan, task_duration)
             return sche_duration
@@ -559,7 +562,7 @@ class Mirasol_engine:
 def mirasol_run(sche_plan=None, mode='profile', req_interval=0):
     print("Start Mirasol inference...")
 
-    torch.cuda.set_device(1)
+    # torch.cuda.set_device(1)
     e = Mirasol_engine(DIM=args.dim)
     res = None
     profiler.start()

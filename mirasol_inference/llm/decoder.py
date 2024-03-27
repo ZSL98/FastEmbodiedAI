@@ -39,7 +39,7 @@ class mirasol_decoder(nn.Module):
                 rotary_pos_emb = True,
                 flash_attn = flash_attn,
                 **attn_layers_kwargs
-            ).half()
+            )
         )
 
         self.wrapped_decoder = AutoregressiveWrapper(
