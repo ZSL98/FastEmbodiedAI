@@ -6,6 +6,7 @@ import argparse
 import sys
 sys.path.append("../../repos/x-transformers")
 from utils.util_func import max_below_threshold
+import xformers
 
 MAX_QUERY_TS = 1000
 
@@ -34,6 +35,10 @@ parser.add_argument('--dim', default=512, help='LLM transformer dimension', type
 ## profile arguments
 parser.add_argument('--warmup_num', default=100, help='warmup_num', type=int)
 parser.add_argument('--trail_num', default=200, help='trail_num', type=int)
+parser.add_argument('--profile_mode', default='base', help='profile_mode', type=str)
+
+## others
+parser.add_argument('--verbose', default=0, help='verbose level', type=int)
 
 # parser.add_argument('--kv_len', default=)
 args = parser.parse_args()
@@ -223,9 +228,9 @@ if __name__ == "__main__":
         from mirasol_inference.inference import mirasol_run
         from kernel_profile.flashinfer.decode_test import flashinfer_decode
 
-        flashinfer_decode(sche_plan = sche_plan)
-        exit()
+        # flashinfer_decode(sche_plan = sche_plan)
+        # exit()
 
-        profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode, req_interval=args.req_interval)
+        profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode)
         if sche_plan is not None:
             s.data_analyze(sche_plan, profile_data)

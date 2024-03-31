@@ -139,9 +139,13 @@ class FIAttention(nn.Module):
         cache = None
     ):
         q = self.to_q(x)
+        if args.verbose == 1:
+            print("x shape: ", x.shape)
 
         # self-attention
         if exists(cache) and context is None:
+            if args.verbose == 1:
+                print("self-attention")
             k_append = self.to_k(x)
             v_append = self.to_v(x)
             k_append = rearrange(k_append, 'b (h w) -> b 1 h w', h = 8)  # num_kv_heads = 8
@@ -150,16 +154,26 @@ class FIAttention(nn.Module):
             v = torch.cat((cache[1], v_append), dim = -3)
         # cross-attention
         elif exists(context):
+            if args.verbose == 1:
+                print("cross-attention")
             k = context[0]
             v = context[1]
 
         # print("Q shape: ", q.shape)
         q = rearrange(q, 'b (h w) -> b h w', h = 8)  # num_qo_heads = 8
-        # k = rearrange(k, 'b c (h w) -> b c h w', h = 8)  # num_kv_heads = 8
-        # v = rearrange(v, 'b c (h w) -> b c h w', h = 8)  # num_kv_heads = 8
+        # k = rearrange(k, 'b m h d -> b h m d')  # num_kv_heads = 8
+        # v = rearrange(v, 'b m h d -> b h m d')  # num_kv_heads = 8
 
+        if args.verbose == 1:
+            print("q shape: ", q.shape)
+            print("k shape: ", k.shape)
+            print("v shape: ", v.shape)
+        
         o = flashinfer.batch_decode_with_padded_kv_cache(q, k, v, "NHD")
 
+        if args.verbose == 1:
+            print("o shape: ", o.shape)
+            print("=================")
         return o
 
 class FIAttentionLayers(nn.Module):
@@ -209,7 +223,7 @@ class FIAttentionLayers(nn.Module):
             self.layers,
             self.layer_dropouts
         )
-
+        # print("layer_types: ", self.layer_types)
         for ind, (layer_type, (norm, block, residual_fn), layer_dropout) in enumerate(zip(*layer_variables)):
             if layer_type == 'a':
                 out = block(x, cache = cache)
@@ -223,7 +237,7 @@ class FIAttentionLayers(nn.Module):
 
 def build_ts():
 
-    torch.cuda.set_device(1)
+    # torch.cuda.set_device(0)
     cross = True
 
     decode_model = FIAttentionLayers(
@@ -281,6 +295,7 @@ def build_graph(ts_model, base_model, ts_decode_num, ts_prefill_num):
     ts_graph_batch_decode = torch.cuda.CUDAGraph()
     with torch.cuda.graph(ts_graph_batch_decode):
         out = ts_model(batch_q, context=[k_context, v_context], cache=[k_cache, v_cache])
+        # out = base_model.decode(single_q, cache=trans_cache, context=context)
     ts_graph_batch_decode.replay()
 
     ts_graph_base_single_decode = torch.cuda.CUDAGraph()
@@ -340,7 +355,8 @@ def profile_graph(ts_graph, mode, task_plan, ts_encode_num, ts_prefill_num, ts_d
 def flashinfer_decode(sche_plan):
 
     # for task_plan in sche_plan:
-    task_plan = ('d', 'd', 'd', 'd', 'p')
+    # task_plan = ('d', 'd', 'd', 'd', 'd')
+    task_plan = ('d')
 
     ts_encode_num = 0
     ts_decode_num = 0 # This is the batch size
@@ -358,7 +374,7 @@ def flashinfer_decode(sche_plan):
     ts_graph = build_graph(ts_model, base_model, ts_decode_num, ts_prefill_num)
 
     profile_graph(ts_graph, 
-                  mode = 'base', 
+                  mode = args.profile_mode, 
                   task_plan = task_plan, 
                   ts_encode_num = ts_encode_num, 
                   ts_prefill_num = ts_prefill_num, 
