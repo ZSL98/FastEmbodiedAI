@@ -25,15 +25,14 @@ class LLaVa_engine:
 
     def __init__(self):
         self.text_max_seq_len = 256
+        self.input_seq_len = args.input_seq_len + 576
 
         # prepare caches for tensors
-        text = torch.randint(0, 256, (1, 128+576 )).to("cuda")
+        text = torch.randint(0, 256, (1, self.input_seq_len)).to("cuda")
         img = torch.randn(1, 3, 336, 336).to("cuda")
-        context = torch.randn(1, 64, 512).to("cuda")
         single_token = torch.randint(0, 256, (1, 1)).to("cuda")
         self.caches = { 'text': text,
                         'img': img,
-                        'context': context,
                         'single_token': single_token}
 
         # prepare models
@@ -50,6 +49,14 @@ class LLaVa_engine:
 
         # prepare some streams to use
         self.streams = [torch.cuda.Stream() for _ in range(36)]
+
+        max_batch_size = 8
+        self.graphs['batch_decode'] = torch.cuda.CUDAGraph()
+        batch_single_token = torch.randint(0, 256, (max_batch_size, 1)).to("cuda")
+        self.caches['batch_single_token'] = batch_single_token
+        self.k_cache_trans = torch.randn(max_batch_size, 32, self.input_seq_len, 128).half().to("cuda")
+        self.v_cache_trans = torch.randn(max_batch_size, 32, self.input_seq_len, 128).half().to("cuda")
+        self.trans_cache = [self.k_cache_trans, self.v_cache_trans]
 
     def generate_cuda_graphs(self):
         recording_kwargs = {}
@@ -90,6 +97,29 @@ class LLaVa_engine:
         self.graphs['encode'].replay()
         torch.cuda.synchronize()
         print("====== Graph for vision generated ======")
+
+
+    def generate_extra_cuda_graphs(self, ts_decode_num, ts_prefill_num):
+
+        self.graphs['batch_decode'] = torch.cuda.CUDAGraph()
+        # # ts_decode_num = 1
+        # batch_single_token = torch.randint(0, 256, (ts_decode_num, 1)).to("cuda")
+        # self.caches['batch_single_token'] = batch_single_token
+
+        # self.k_cache_trans = torch.randn(ts_decode_num, 32, self.input_seq_len, 128).half().to("cuda")
+        # # self.v_cache_trans = torch.randn(ts_decode_num, 32, self.input_seq_len, 128).half().to("cuda")
+        # self.trans_cache = [self.k_cache_trans, self.k_cache_trans]
+
+        recording_kwargs = {}
+        with torch.cuda.graph(self.graphs['batch_decode'], **recording_kwargs):
+            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
+                self.caches['batch_single_token'][:ts_decode_num, ...], 
+                seq_len = self.text_max_seq_len,
+                kv_cache = None,
+                supercache = [self.trans_cache[0][:ts_decode_num, ...], self.trans_cache[1][:ts_decode_num, ...]])
+
+        self.graphs['batch_decode'].replay()
+        torch.cuda.synchronize()
 
 
     def run_cuda_graphs(self, num_trails):
@@ -188,6 +218,35 @@ class LLaVa_engine:
         return durations, total_duration
 
 
+    def run_ts(self, task_plan):
+        if args.profile_mode == 'base':
+            stream_id = 0
+            for stage in task_plan:
+                if stage == 'e':
+                    with torch.cuda.stream(self.streams[stream_id]):
+                        self.graphs['encode'].replay()
+                elif stage == 'p':
+                    with torch.cuda.stream(self.streams[stream_id]):
+                        self.graphs['prefill'].replay()
+                elif stage == 'd':
+                    with torch.cuda.stream(self.streams[stream_id]):
+                        self.graphs['decode'].replay()
+                
+                stream_id = stream_id + 1
+
+        elif args.profile_mode == 'flashinfer':
+
+            if 'd' in task_plan: 
+                with torch.cuda.stream(self.streams[0]):
+                    self.graphs['batch_decode'].replay()
+            for i in range(task_plan.count('p')):
+                with torch.cuda.stream(self.streams[i+2]):
+                    self.graphs['prefill'].replay()
+            if 'e' in task_plan:
+                with torch.cuda.stream(self.streams[1]):
+                    self.graphs['encode'].replay()
+
+
     def run_benchmarks(self,
                        mode: str,
                        use_cuda_graphs: bool,
@@ -222,8 +281,50 @@ class LLaVa_engine:
             print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
 
         elif mode == 'profile':
-            pass
+            if args.profile_mode == 'flashinfer':
+                del self.graphs['decode']
+            sche_duration = {}
+            ts_encode_num = 0
+            ts_decode_num = 0
+            ts_prefill_num = 0
 
+            for task_plan in sche_plan:
+                # prepare batch graph
+                for stage in task_plan:
+                    if stage == 'e':
+                        ts_encode_num = ts_encode_num + 1
+                    elif stage == 'p':
+                        ts_prefill_num = ts_prefill_num + 1
+                    elif stage == 'd':
+                        ts_decode_num = ts_decode_num + 1
+
+                if ts_decode_num != 0:
+                    self.generate_extra_cuda_graphs(ts_decode_num, ts_prefill_num)
+
+                for i in range(args.warmup_num):
+                    self.run_ts(task_plan)
+                torch.cuda.synchronize()
+                # Time the ts duration
+                start_time = time.time()
+                for i in range(args.trail_num):
+                    self.run_ts(task_plan)
+                    torch.cuda.synchronize()
+
+                task_duration = (time.time() - start_time) * 1000 / args.trail_num
+                sche_duration[task_plan] = task_duration
+                print(task_plan, task_duration)
+
+                if ts_decode_num != 0:
+                    del self.graphs['batch_decode']
+                    # del self.graphs['decode']
+                    # del self.k_cache_trans
+                    # del self.v_cache_trans
+                    # del self.trans_cache
+                    del self.new_cache
+                    del self.out
+                    torch.cuda.empty_cache()
+
+            return sche_duration
 
 
 def llava_run(sche_plan=None, mode='profile'):
@@ -241,12 +342,12 @@ def llava_run(sche_plan=None, mode='profile'):
     else:
         res = e.run_benchmarks(mode='profile',
                                use_cuda_graphs=True,
-                               num_trails=1000,
+                               num_trails=100,
                                sche_plan=sche_plan)
     torch.cuda.synchronize()
     profiler.stop()
 
-    print("Finished.")
+    print("LLaVa inference finished.")
     return res
 
 

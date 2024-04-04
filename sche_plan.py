@@ -216,7 +216,7 @@ class SimuScheduler:
 
 if __name__ == "__main__":
 
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(1)
 
     q_manager = SimuQueryManage(args)
     s = SimuScheduler(args, q_manager)
