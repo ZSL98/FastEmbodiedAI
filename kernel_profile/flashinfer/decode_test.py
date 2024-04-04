@@ -258,7 +258,8 @@ def build_ts():
 def build_graph(ts_model, base_model, ts_decode_num, ts_prefill_num):
 
     
-    padded_kv_len = args.input_seq_len
+    # padded_kv_len = args.input_seq_len
+    padded_kv_len = 128
     num_qo_heads = 8
     num_kv_heads = 8
     batch_size = ts_decode_num
@@ -277,12 +278,13 @@ def build_graph(ts_model, base_model, ts_decode_num, ts_prefill_num):
     # v_cache_trans = rearrange(v_context, 'b c h w -> b h c w')
 
     # For single request profile
-    single_q = torch.randn(1, 1, args.dim).half().to("cuda")
-    prefill_q = torch.randn(1, args.input_seq_len, args.dim).half().to("cuda")
-    k_cache_trans = torch.randn(1, num_kv_heads, padded_kv_len, head_dim).half().to("cuda")
-    v_cache_trans = torch.randn(1, num_kv_heads, padded_kv_len, head_dim).half().to("cuda")
+    tmp_bs = 1
+    single_q = torch.randn(tmp_bs, 1, args.dim).half().to("cuda")
+    prefill_q = torch.randn(tmp_bs, args.input_seq_len, args.dim).half().to("cuda")
+    k_cache_trans = torch.randn(tmp_bs, num_kv_heads, padded_kv_len, head_dim).half().to("cuda")
+    v_cache_trans = torch.randn(tmp_bs, num_kv_heads, padded_kv_len, head_dim).half().to("cuda")
     trans_cache = [k_cache_trans, v_cache_trans]
-    context = torch.randn(1, context_kv_len, args.dim).half().to("cuda")
+    context = torch.randn(tmp_bs, context_kv_len, args.dim).half().to("cuda")
 
     # Batch decode with flashinfer
     out = ts_model(batch_q, context=[k_context, v_context], cache=[k_cache, v_cache])
@@ -294,8 +296,8 @@ def build_graph(ts_model, base_model, ts_decode_num, ts_prefill_num):
     
     ts_graph_batch_decode = torch.cuda.CUDAGraph()
     with torch.cuda.graph(ts_graph_batch_decode):
-        out = ts_model(batch_q, context=[k_context, v_context], cache=[k_cache, v_cache])
-        # out = base_model.decode(single_q, cache=trans_cache, context=context)
+        # out = ts_model(batch_q, context=[k_context, v_context], cache=[k_cache, v_cache])
+        out = base_model.decode(single_q, cache=trans_cache, context=context)
     ts_graph_batch_decode.replay()
 
     ts_graph_base_single_decode = torch.cuda.CUDAGraph()
@@ -344,8 +346,14 @@ def profile_graph(ts_graph, mode, task_plan, ts_encode_num, ts_prefill_num, ts_d
         for iteration in range(args.trail_num):
             with torch.cuda.stream(streams[0]):
                 ts_graph['bd_flashinfer'].replay()
-            with torch.cuda.stream(streams[1]):
-                ts_graph['sp_base'].replay()
+            # with torch.cuda.stream(streams[1]):
+            #     ts_graph['sp_base'].replay()
+            stream_id = 1
+            for stage in task_plan:
+                if stage == 'p':
+                    with torch.cuda.stream(streams[stream_id]):
+                        ts_graph['sd_base'].replay()
+                    stream_id = stream_id + 1
 
             torch.cuda.synchronize()
 
@@ -355,8 +363,9 @@ def profile_graph(ts_graph, mode, task_plan, ts_encode_num, ts_prefill_num, ts_d
 def flashinfer_decode(sche_plan):
 
     # for task_plan in sche_plan:
-    # task_plan = ('d', 'd', 'd', 'd', 'd')
-    task_plan = ('d')
+    task_plan = ('d',) * 1
+    task_plan = task_plan + ('p',) * 4
+    # task_plan = ('d')
 
     ts_encode_num = 0
     ts_decode_num = 0 # This is the batch size

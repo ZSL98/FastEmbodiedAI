@@ -30,12 +30,14 @@ parser.add_argument('--mode', default='profile', help='mode', type=str)
 parser.add_argument('--req_interval', default=0, help='req_interval', type=float)
 
 ## LLM transformer detail
+parser.add_argument('--model', default='mirasol', help='model name', type=str)
 parser.add_argument('--dim', default=512, help='LLM transformer dimension', type=int)
 
 ## profile arguments
 parser.add_argument('--warmup_num', default=100, help='warmup_num', type=int)
 parser.add_argument('--trail_num', default=200, help='trail_num', type=int)
 parser.add_argument('--profile_mode', default='base', help='profile_mode', type=str)
+parser.add_argument('--only_profile', default=False, help='only profile', type=bool)
 
 ## others
 parser.add_argument('--verbose', default=0, help='verbose level', type=int)
@@ -214,7 +216,7 @@ class SimuScheduler:
 
 if __name__ == "__main__":
 
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
 
     q_manager = SimuQueryManage(args)
     s = SimuScheduler(args, q_manager)
@@ -222,15 +224,24 @@ if __name__ == "__main__":
         sche_plan = None
     else:
         sche_plan = s.schedule()
+    
+    if args.only_profile:
+        import x_transformers
+        from kernel_profile.flashinfer.decode_test import flashinfer_decode
+
+        flashinfer_decode(sche_plan = sche_plan)
+        exit()
 
     if args.real_run:
         import x_transformers
-        from mirasol_inference.inference import mirasol_run
-        from kernel_profile.flashinfer.decode_test import flashinfer_decode
 
-        # flashinfer_decode(sche_plan = sche_plan)
-        # exit()
+        profile_data = None
+        if args.model == "mirasol":
+            from mirasol_inference.inference import mirasol_run
+            profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode)
+        elif args.model == "llava":
+            from llava_inference.inference import llava_run
+            profile_data = llava_run(sche_plan = sche_plan, mode = args.mode)
 
-        profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode)
         if sche_plan is not None:
             s.data_analyze(sche_plan, profile_data)
