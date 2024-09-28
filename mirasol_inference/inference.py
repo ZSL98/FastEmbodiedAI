@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import time
+import math
 import torch.multiprocessing as mp
 import torch.cuda.profiler as profiler
 from cuda import cuda, cudart
@@ -155,8 +156,9 @@ def decoder_process(events, buffer_ids, encoder_buffers, output, decoder):
 
 class Mirasol_engine:
 
-    def __init__(self, DIM=512):
+    def __init__(self, DIM=512, idx=0):
 
+        self.idx = idx
         self.text_max_seq_len = 64
 
         # prepare caches for tensors
@@ -196,17 +198,26 @@ class Mirasol_engine:
                        'encoder': encoder, 
                        'decoder': decoder}
 
+        self.task_queue = mp.Queue()
+        
+        serialize_required = False
+        if not serialize_required:
+            self.engine_init()
+
+    def engine_init(self):
         # prepare cuda graphs
         self.graphs = {'vision': torch.cuda.CUDAGraph(),
-                       'audio': torch.cuda.CUDAGraph(),
-                       'combiner': torch.cuda.CUDAGraph(),
-                       'encoder': torch.cuda.CUDAGraph(),
-                       'prefill': torch.cuda.CUDAGraph(),
-                       'decode': torch.cuda.CUDAGraph()}
+                    'audio': torch.cuda.CUDAGraph(),
+                    'combiner': torch.cuda.CUDAGraph(),
+                    'encoder': torch.cuda.CUDAGraph(),
+                    'prefill': torch.cuda.CUDAGraph(),
+                    'decode': torch.cuda.CUDAGraph()}
         self.generate_cuda_graphs()
 
         # prepare some streams to use
-        self.streams = [torch.cuda.Stream() for _ in range(36)]
+        self.streams = [torch.cuda.Stream() for _ in range(18)]
+        self.start_events = [torch.cuda.Event(enable_timing=True) for _ in range(args.num_trails)]
+        self.end_events = [torch.cuda.Event(enable_timing=True) for _ in range(args.num_trails)]
 
     def generate_cuda_graphs(self):
 
@@ -454,22 +465,42 @@ class Mirasol_engine:
         for process in processes:
             process.join()
 
+
     def run_VL_ms(self):
         with torch.cuda.stream(self.streams[0]):
             self.run_V_cuda_graphs(num_trails=1, required_sync=False)
         with torch.cuda.stream(self.streams[1]):
             self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
 
-    def run_single_request(self, durations, i):
-        stream_id = i%2
-        req_start = time.time()
 
+    def run_single_request(self, durations, i, worker_num):
+        stream_id = i%worker_num
+        req_start = time.time()
+        print("Launch - {}".format(self.idx))
         with torch.cuda.stream(self.streams[stream_id]):
             self.run_V_cuda_graphs(num_trails=1, required_sync=False)
             self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
         self.streams[stream_id].synchronize()
         duration = time.time() - req_start
+        print("Request duration: {:.3f} ms - {}".format(duration*1000, self.idx))
         durations.append(time.time() - req_start)
+
+
+    def run_single_request_v2(self, stream, start_event, end_event, required_sync=False):
+        req_start = time.time()
+        # print("Launch - {}".format(self.idx))
+        
+        with torch.cuda.stream(stream):
+            start_event.record()
+            self.run_V_cuda_graphs(num_trails=1, required_sync=False)
+            self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
+            end_event.record()
+        if required_sync:
+            stream.synchronize()
+            duration = time.time() - req_start
+            print("Request duration: {:.3f} ms - {}".format(duration*1000, self.idx))
+            durations.append(time.time() - req_start)
+
 
     def run_single_V(self, num_trails):
         trail_expand = 10
@@ -503,7 +534,7 @@ class Mirasol_engine:
         durations = []
         threads = []
         for i in range(num_trails):
-            thread = threading.Thread(target=self.run_single_request, args=(durations, i))
+            thread = threading.Thread(target=self.run_single_request, args=(durations, i, 2))
             threads.append(thread)
 
         start = time.time()
@@ -540,6 +571,28 @@ class Mirasol_engine:
         durations = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
 
         return durations, total_duration
+
+
+    def run_as_a_worker(self):
+
+        req_num = 0
+        start_time = time.time()
+        while True:
+            if not self.task_queue.empty():
+                request_id = self.task_queue.get()
+                print(f"Worker {self.idx} processing request: {request_id}")
+
+                req_start_time = time.time()
+                self.run_single_request_v2(self.streams[0], self.start_events[req_num], self.end_events[req_num], True)
+                req_num = req_num + 1
+                req_duration = time.time() - req_start_time
+            else:
+                time.sleep(0.01)
+
+            if req_num == 200:
+                duration = time.time() - start_time
+                print("200 durations: ", duration)
+
 
     def run_all_in_mp(self):
         # [FIXME]: This function not tested yet
@@ -623,7 +676,7 @@ class Mirasol_engine:
         if mode == 'seq' and use_cuda_graphs:
             durations = []
             for i in range(num_trails):
-                self.run_single_request(durations, 0)
+                self.run_single_request(durations, 0, worker_num=1)
             torch.cuda.synchronize()
             print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
 
@@ -651,14 +704,18 @@ class Mirasol_engine:
             thread1.join()
             thread2.join()
 
+        # multi threads, multi streams, graphs contend and is not a correct impl
         elif mode == 'parallel':
+            assert(0)
             durations, total_duration = self.run_parallel_req(num_trails=num_trails)
             print("Query latency: {:.2f} ms".format(np.mean(durations)*1000))
             print("IN throughput: {:.2f}".format(1/args.req_interval))
             print("OUT throughput: {:.2f}".format(num_trails/total_duration))
             print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
 
+        # single thread, multi streams, graphs contend and is not a correct impl
         elif mode == 'parallel_v2':
+            assert(0)
             durations, total_duration = self.run_parallel_req_v2(num_trails=num_trails)
             print("Query latency: {:.2f} ms".format(np.mean(durations)))
             print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
@@ -701,19 +758,74 @@ def mirasol_run(sche_plan=None, mode='profile'):
     print("Start Mirasol inference...")
 
     # torch.cuda.set_device(1)
-    e = Mirasol_engine(DIM=args.dim)
+    mp.set_start_method('spawn')
+
     res = None
     profiler.start()
-    if sche_plan is None:
-        e.run_benchmarks(mode=mode,
-                         use_cuda_graphs=True,
-                         num_trails=4000,
-                         sche_plan=None)
-    else:
+
+    if mode=='profile':
+        e = Mirasol_engine(DIM=args.dim, idx=0)
         res = e.run_benchmarks(mode='profile',
                                use_cuda_graphs=True,
-                               num_trails=1000,
+                               num_trails=args.num_trails,
                                sche_plan=sche_plan)
+
+    elif mode=='parallel_sp':
+        worker_num = args.worker_num
+        e = [Mirasol_engine(DIM=args.dim, idx=i) for i in range(worker_num)]
+        start = time.time()
+
+        streams = [torch.cuda.Stream() for i in range(worker_num)]
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(args.num_trails)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(args.num_trails)]
+
+        for i in range(args.num_trails):
+            worker_id = i%worker_num
+            time.sleep(args.req_interval)
+
+            e[worker_id].run_single_request_v2(streams[worker_id], start_events[i], end_events[i])
+
+        torch.cuda.synchronize()
+        total_duration = time.time() - start
+        durations = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
+
+        print("GPU latency: {:.2f} ms".format(np.mean(durations)))
+
+        # Below four lines is an estimation
+        start_times = [i * args.req_interval * 1000 for i in range(args.num_trails)]
+        gpu_time = total_duration * 1000 / args.num_trails * worker_num
+        end_times = sorted([gpu_time + i * gpu_time for i in range(math.ceil(args.num_trails/worker_num))] * worker_num)[:args.num_trails]
+        e2e_durations = [end_times[i] - start_times[i] for i in range(args.num_trails)]
+
+        print("E2E latency: {:.2f} ms".format(np.mean(e2e_durations)))
+        print("IN throughput: {:.2f}".format(1/args.req_interval))
+        print("OUT throughput: {:.2f}".format(args.num_trails/total_duration))
+
+    elif mode == 'parallel_mp':
+        # [BUG] multi-process workers mode is not working.
+        # [ERROR] RuntimeError: Cowardly refusing to serialize non-leaf tensor which requires_grad, since autograd does not support crossing process boundaries.  If you just want to transfer the data, call detach() on the tensor before serializing (e.g., putting it on the queue)
+        worker_num = args.worker_num
+        e = [Mirasol_engine(DIM=args.dim, idx=i) for i in range(worker_num)]
+        processes = [mp.Process(target=e[i].run_as_a_worker) for i in range(worker_num)]
+
+        for process in processes:
+            process.start()
+
+        for i in range(args.num_trails):
+            worker_id = i%worker_num
+            time.sleep(args.req_interval)
+            e[worker_id].task_queue.put(i)
+
+        for process in processes:
+            process.join()
+
+    else:
+        e = Mirasol_engine(DIM=args.dim, idx=0)
+        e.run_benchmarks(mode=mode,
+                         use_cuda_graphs=True,
+                         num_trails=args.num_trails,
+                         sche_plan=None)
+
     torch.cuda.synchronize()
     profiler.stop()
 
@@ -724,52 +836,3 @@ def mirasol_run(sche_plan=None, mode='profile'):
 if __name__ == "__main__":
     mirasol_run()
     exit()
-
-
-    # Below is the experimental code
-    """
-    mp.set_start_method('spawn')
-    torch.cuda.set_device(0)
-    # os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "100"
-    dimension = 512
-
-    ## prepare tensors (input)
-    print('prepare tensors (input)')
-    audio_tokens = torch.randn(1, 12, dimension).to("cuda")
-    video_tokens = torch.randn(1, 12, dimension).to("cuda")
-    text_tokens = torch.randint(0, 256, (1, 128)).to("cuda")
-    caches = [audio_tokens, video_tokens, text_tokens]
-
-    ## prepare intermediate double buffers (output)
-    print('prepare intermediate double buffers (output)')
-    audio_buffers = [torch.randn(1, 1, 4, dimension).to("cuda") for _ in range(2)]
-    video_buffers = [torch.randn(1, 1, 4, dimension).to("cuda") for _ in range(2)]
-    combiner_buffers = [torch.randn(1, 8, dimension).to("cuda") for _ in range(2)]
-    encoder_buffers = [torch.randn(1, 3, dimension).to("cuda") for _ in range(2)]
-    av_context = torch.randn(1, 18, dimension).to("cuda")
-    double_caches = [audio_buffers, video_buffers, combiner_buffers, encoder_buffers, av_context]
-
-    ## prepare intermediate buffer (input) for CUDAgraph
-    print('prepare intermediate buffer (input) for CUDAgraph')
-    encoded_video = torch.randn(1, 1, 4, dimension).to("cuda")
-    encoded_audio = torch.randn(1, 1, 4, dimension).to("cuda")
-    combined_audio_video_tokens = torch.randn(1, 8, dimension).to("cuda")
-    av_embeddings = torch.randn(1, 3, dimension).to("cuda")
-
-    ## prepare components
-    print('prepare components')
-    vision_enc = vision_encoder(dim=dimension).to("cuda")
-    audio_enc = audio_encoder(dim=dimension).to("cuda")
-    combiner_enc = combiner(dim=dimension).to("cuda")
-    encoder = mirasol_encoder(dim=dimension).to("cuda")
-    decoder = mirasol_decoder(dim=dimension).to("cuda")
-    models = [vision_enc, audio_enc, combiner_enc, encoder, decoder]
-    print('preparation finished')
-
-    # sequential_V_exec(models, caches)
-    # parallel_exec(models, caches, double_caches)
-    # stream_parallel_exec(models, caches, double_caches)
-    graph_parallel_exec(models, caches, double_caches)
-
-    print('Finished.')
-    """

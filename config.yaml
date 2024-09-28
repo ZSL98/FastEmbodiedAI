@@ -1,0 +1,21 @@
+encoder_n: 1
+prefill_n: 1
+decode_n: 1
+
+encoder_len: 1
+prefill_len: 1
+decode_len: 6
+
+simu_ts_len: 500
+real_run: True
+mode: "ours"
+profile_mode: "flashinfer"
+verbose: 0
+
+req_interval: 0.146
+query_interval: 1
+model: "llava"
+enable_slice: False
+
+trail_num: 20
+warmup_num: 10

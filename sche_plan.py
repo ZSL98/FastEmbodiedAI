@@ -4,6 +4,7 @@ Design how to group computation stages
 import torch
 import argparse
 import sys
+import yaml
 sys.path.append("../../repos/x-transformers")
 from utils.util_func import max_below_threshold
 import xformers
@@ -32,18 +33,32 @@ parser.add_argument('--req_interval', default=0, help='req_interval', type=float
 ## LLM transformer detail
 parser.add_argument('--model', default='mirasol', help='model name', type=str)
 parser.add_argument('--dim', default=512, help='LLM transformer dimension', type=int)
+parser.add_argument('--enable_slice', default=False, help='enable_slice', type=bool)
 
 ## profile arguments
-parser.add_argument('--warmup_num', default=100, help='warmup_num', type=int)
-parser.add_argument('--trail_num', default=200, help='trail_num', type=int)
+parser.add_argument('--warmup_num', default=10, help='warmup_num', type=int)
+parser.add_argument('--trail_num', default=20, help='profile trail_num', type=int)
 parser.add_argument('--profile_mode', default='base', help='profile_mode', type=str)
 parser.add_argument('--only_profile', default=False, help='only profile', type=bool)
+
+## serving arguments
+parser.add_argument('--num_trails', default=1000, help='request num', type=int)
+parser.add_argument('--worker_num', default=2, help='worker num', type=int)
 
 ## others
 parser.add_argument('--verbose', default=0, help='verbose level', type=int)
 
-# parser.add_argument('--kv_len', default=)
+## The script will update arguments in config if it exists
+parser.add_argument('--config', help='YAML configuration file')
 args = parser.parse_args()
+
+if args.config:
+    with open(args.config, 'r') as file:
+        config = yaml.safe_load(file)
+    for key, value in config.items():
+        setattr(args, key, value)
+        # parser.add_argument(f'--{key}', default=value)
+
 
 class Query:
     def __init__(self, args, query_id):
@@ -79,13 +94,16 @@ class SimuQueryManage:
             self.query_num = self.query_num + 1
 
 
-    def gen_plan(self):
+    def gen_plan(self, ptype='str'):
         ts_group = list()
         for query in self.query_list:
             ts_group.append(query.task_step)
         
-        ts_group = [self.task_detail[i] for i in ts_group]
-        return ts_group
+        if ptype == 'int':
+            return ts_group
+        elif ptype == 'str':
+            ts_group = [self.task_detail[i] for i in ts_group]
+            return ts_group
 
     def replace_task(self, ts, task_plan, enable_recompute: bool):
         # This function is no need anymore
@@ -103,7 +121,7 @@ class SimuQueryManage:
             return
         else:
             # update self.task, task_detail, task_len
-            replace_pos = [i+self.args.encoder_n for i in range(0, MAX_QUERY_TS, self.args.query_interval)]
+            replace_pos = [i+self.args.encoder_n*self.args.encoder_len for i in range(0, MAX_QUERY_TS, self.args.query_interval)]
             pointer = 0
             new_task_detail = self.task_detail.copy()
             while replace_pos[pointer] < len(new_task_detail):
@@ -118,6 +136,9 @@ class SimuQueryManage:
     def get_query(self, query_id):
         return self.query_list[query_id]
 
+    def get_task_plan(self):
+        return self.task_detail
+
 
 class SimuScheduler:
     def __init__(self, args, q):
@@ -126,13 +147,14 @@ class SimuScheduler:
         self.sche_record = list()
         self.args = args
 
-    def schedule(self):
+    def schedule(self, ptype):
         self.query_manager.update_task(self.args.enable_recompute)
         print(self.query_manager.task_detail)
         print(self.query_manager.task_len)
+        self.sche_record = []
         for ts in range(self.simu_len):
             self.query_manager.update(ts)
-            task_plan = self.query_manager.gen_plan()
+            task_plan = self.query_manager.gen_plan(ptype=ptype)
             # task_plan = self.query_manager.replace_task(ts, task_plan, self.args.enable_recompute)
             self.sche_record.append(task_plan)
         
@@ -151,6 +173,7 @@ class SimuScheduler:
                 count_dict[item_tuple] = 1
 
         # Print the counts
+        print("---------")
         for item, count in count_dict.items():
             print(f"{item}: {count}")
 
@@ -214,17 +237,54 @@ class SimuScheduler:
         print("Avg token latency: {:.2f} ms".format(avg_query_token_latency))
         print("frame interval: {:.2f} ms".format(sum(ts_duration_all) / self.args.simu_ts_len * self.args.query_interval))
 
-if __name__ == "__main__":
 
-    torch.cuda.set_device(1)
+def pattern_analyze(task_plan):
+    ts_encode_num = 0
+    ts_prefill_num = 0
+    ts_decode_num = 0
 
-    q_manager = SimuQueryManage(args)
-    s = SimuScheduler(args, q_manager)
-    if args.mode != "profile":
-        sche_plan = None
-    else:
-        sche_plan = s.schedule()
+    for stage in task_plan:
+        if stage == 'e':
+            ts_encode_num = ts_encode_num + 1
+        elif stage == 'p':
+            ts_prefill_num = ts_prefill_num + 1
+        elif stage == 'd':
+            ts_decode_num = ts_decode_num + 1
+
+    return (ts_encode_num, ts_prefill_num, ts_decode_num)
+
+def pattern_analyze_ad(task_plan):
+
+    # JOB_PLAN: e, e, e, p, p, d, d, d, d, d, d
+    # job_plan: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10
+    # task_plan: (7, 7) --> ts_detail: [{'d': 0}, {'p': 0}]
+    ts_detail = []
+    for item in task_plan:
+        if item < args.encoder_n * args.encoder_len:
+            ts_detail.append({'e': item % args.encoder_n})
+        elif item < args.encoder_n * args.encoder_len + args.prefill_n * args.prefill_len:
+            ts_detail.append({'p': (item - args.encoder_n * args.encoder_len) % args.prefill_n})
+        else:
+            ts_detail.append({'d': (item - args.encoder_n * args.encoder_len - args.prefill_n * args.prefill_len) % args.decode_n})
     
+    return ts_detail
+
+
+if __name__ == "__main__":
+    print(args)
+
+    torch.cuda.set_device(0)
+
+    q_manager1 = SimuQueryManage(args)
+    q_manager2 = SimuQueryManage(args)
+    s1 = SimuScheduler(args, q_manager1)
+    s2 = SimuScheduler(args, q_manager2)
+    if args.mode == "profile" or args.mode == "ours":
+        sche_plan = s1.schedule(ptype='str')
+        sche_plan_by_id = s2.schedule(ptype='int')
+    else:
+        sche_plan = None
+
     if args.only_profile:
         import x_transformers
         from kernel_profile.flashinfer.decode_test import flashinfer_decode
@@ -236,12 +296,20 @@ if __name__ == "__main__":
         import x_transformers
 
         profile_data = None
-        if args.model == "mirasol":
-            from mirasol_inference.inference import mirasol_run
-            profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode)
-        elif args.model == "llava":
-            from llava_inference.inference import llava_run
-            profile_data = llava_run(sche_plan = sche_plan, mode = args.mode)
 
-        if sche_plan is not None:
-            s.data_analyze(sche_plan, profile_data)
+        if args.enable_slice:
+            if args.model == "llava":
+                from llava_inference.sliced_inference import llava_run_sliced
+                profile_data = llava_run_sliced(sche_plan = sche_plan_by_id)
+            
+
+        else:
+            if args.model == "mirasol":
+                from mirasol_inference.inference import mirasol_run
+                profile_data = mirasol_run(sche_plan = sche_plan, mode = args.mode)
+            elif args.model == "llava":
+                from llava_inference.inference import llava_run
+                profile_data = llava_run(sche_plan = sche_plan, mode = args.mode)
+
+            if args.mode == "profile":
+                s.data_analyze(sche_plan, profile_data)
