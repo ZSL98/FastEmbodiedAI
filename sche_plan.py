@@ -7,7 +7,7 @@ import sys
 import yaml
 sys.path.append("../../repos/x-transformers")
 from utils.util_func import max_below_threshold
-import xformers
+# import xformers
 
 MAX_QUERY_TS = 1000
 
@@ -42,7 +42,7 @@ parser.add_argument('--profile_mode', default='base', help='profile_mode', type=
 parser.add_argument('--only_profile', default=False, help='only profile', type=bool)
 
 ## serving arguments
-parser.add_argument('--num_trails', default=1000, help='request num', type=int)
+parser.add_argument('--num_trails', default=100, help='request num', type=int)
 parser.add_argument('--worker_num', default=2, help='worker num', type=int)
 
 ## others

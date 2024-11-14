@@ -10,7 +10,7 @@ import torch.multiprocessing as mp
 from torch.multiprocessing import Process, Value, Array
 
 import torch.cuda.profiler as profiler
-from cuda import cuda, cudart
+# from cuda import cuda, cudart
 
 from .encoder.model import vision_transformer, vit_sliced
 from .llm.model import llama, llama_sliced
@@ -74,7 +74,7 @@ class LLaVa_sliced_engine:
             )
             # print("self.out, self.new_cache: ", self.out.shape, self.new_cache.attn_intermediates[1].cached_kv[0].shape)
             new_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(new_graph, **recording_kwargs):
+            with torch.cuda.graph(new_graph, stream=self.streams[0]):
                 self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
                     self.caches['batch_single_token'][:bs, ...],
                     seq_len = self.text_max_seq_len,

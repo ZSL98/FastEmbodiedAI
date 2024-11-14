@@ -44,15 +44,15 @@ class LLaVa_engine:
         self.models = {'vit': vit, 
                        'llm': llm}
 
+        # prepare some streams to use
+        self.streams = [torch.cuda.Stream() for _ in range(36)]
+
         # prepare cuda graphs
         self.graphs = {'encode': torch.cuda.CUDAGraph(),
                         'prefill': torch.cuda.CUDAGraph(),
                         'decode': torch.cuda.CUDAGraph()}
         self.generate_cuda_graphs()
         self.ours_graphs = {}
-
-        # prepare some streams to use
-        self.streams = [torch.cuda.Stream() for _ in range(36)]
 
         max_batch_size = 8
         self.graphs['batch_decode'] = torch.cuda.CUDAGraph()
@@ -71,15 +71,12 @@ class LLaVa_engine:
         # [BUG]: I have to run the following command once to make the cuda graph generated properly
         # [FIXME]: The output caches of the graphs have not been designed yet
         # [FIXME]: The decode phase is static, which is just an approximate
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
-                                                            seq_len = self.text_max_seq_len,
-                                                            kv_cache = None)
+        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], kv_cache = None)
         del out
         del new_cache
-        with torch.cuda.graph(self.graphs['prefill'], **recording_kwargs):
-            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
-                                                                seq_len = self.text_max_seq_len, 
-                                                                kv_cache = None)
+        with torch.cuda.graph(self.graphs['prefill'], stream=self.streams[1]):
+            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], kv_cache = None)
+
         self.graphs['prefill'].replay()
         torch.cuda.synchronize()
         # self.kv_cache = self.new_cache
@@ -87,21 +84,18 @@ class LLaVa_engine:
         print("====== Graph for prefill generated ======")
 
         ## Make cuda graph for the decode phase
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
-                                                            seq_len = self.text_max_seq_len, 
-                                                            kv_cache = self.new_cache)
+        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], kv_cache = self.new_cache)
         del out
         del new_cache
-        with torch.cuda.graph(self.graphs['decode'], **recording_kwargs):
-            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], 
-                                                                seq_len = self.text_max_seq_len, 
-                                                                kv_cache = self.new_cache)
+        with torch.cuda.graph(self.graphs['decode'], stream=self.streams[0]):
+            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], kv_cache = self.new_cache)
+
         self.graphs['decode'].replay()
         torch.cuda.synchronize()
         print("====== Graph for decode generated ======")
 
         ## Make cuda graph for the vision encoder
-        with torch.cuda.graph(self.graphs['encode'], **recording_kwargs):
+        with torch.cuda.graph(self.graphs['encode'], stream=self.streams[2]):
             out = self.models['vit'](self.caches['img'])
             # print("out shape: ", out.shape)
         self.graphs['encode'].replay()
@@ -116,7 +110,7 @@ class LLaVa_engine:
         recording_kwargs = {}
         if ts_decode_num != 0:
             new_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(new_graph, **recording_kwargs):
+            with torch.cuda.graph(new_graph, stream=self.streams[0]):
                 self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(
                     self.caches['batch_single_token'][:ts_decode_num, ...], 
                     seq_len = self.text_max_seq_len,
@@ -360,7 +354,7 @@ class LLaVa_engine:
 
                 for group in all_graph_group:
                     for j, graph_name in enumerate(group):
-                        # print("execute: ", graph_name)
+                        print("execute: ", graph_name)
                         with torch.cuda.stream(self.streams[j]):
                             group[graph_name].replay()
                     torch.cuda.synchronize()
