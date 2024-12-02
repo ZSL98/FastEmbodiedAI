@@ -25,7 +25,7 @@ class vision_transformer(nn.Module):
                 dim=encoder_dim,
                 depth=encoder_depth,
                 heads=encoder_heads,
-            ),
+            ).to(torch.bfloat16),
         )
 
     @beartype

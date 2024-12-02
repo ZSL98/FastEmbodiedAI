@@ -34,12 +34,12 @@ class llama(nn.Module):
                 depth = decoder_depth,
                 dim_head = attn_dim_head,
                 heads = attn_heads,
-                num_mem_kv = 1,
+                num_mem_kv = 0,
                 cross_attend = False,
                 rotary_pos_emb = True,
                 flash_attn = flash_attn,
                 **attn_layers_kwargs
-            )
+            ).to(torch.bfloat16)
         )
 
         self.wrapped_decoder = AutoregressiveWrapper(
