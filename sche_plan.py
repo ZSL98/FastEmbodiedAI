@@ -6,6 +6,7 @@ import argparse
 import sys
 import yaml
 sys.path.append("../../repos/x-transformers")
+sys.path.append("../../repos/diffusion_policy")
 from utils.util_func import max_below_threshold
 # import xformers
 
@@ -13,7 +14,7 @@ MAX_QUERY_TS = 1000
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--query_interval', default=2, help='The iterval of requests to come', type=int)
-parser.add_argument('--input_seq_len', default=128, help='input sequence length', type=int)
+parser.add_argument('--input_seq_len', default=8, help='input sequence length', type=int)
 
 parser.add_argument('--encoder_n', default=1, help='The number of ts that encoder takes', type=int)
 parser.add_argument('--prefill_n', default=1, help='The number of ts that prefill takes', type=int)
@@ -310,6 +311,15 @@ if __name__ == "__main__":
             elif args.model == "llava":
                 from llava_inference.inference import llava_run
                 profile_data = llava_run(sche_plan = sche_plan, mode = args.mode)
+            elif args.model == "openvla":
+                from openvla_inference.inference import openvla_run
+                profile_data = openvla_run(sche_plan = sche_plan, mode = args.mode)
+            elif args.model == "diffusion_transformer":
+                from diffusion_inference.inference import diffusion_run
+                profile_data = diffusion_run(sche_plan = sche_plan, mode = args.mode, model_type = 'transformer')
+            elif args.model == "diffusion_cnn":
+                from diffusion_inference.inference import diffusion_run
+                profile_data = diffusion_run(sche_plan = sche_plan, mode = args.mode, model_type = 'cnn')
 
             if args.mode == "profile":
                 s.data_analyze(sche_plan, profile_data)

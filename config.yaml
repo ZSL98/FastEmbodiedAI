@@ -1,20 +1,25 @@
+# For auto-regressive models
 encoder_n: 1
 prefill_n: 1
 decode_n: 1
-
 encoder_len: 1
 prefill_len: 1
 decode_len: 6
 
+# For DiffusionPolicy
+diffusion_step: 100
+diffusion_stage_num: 4
+
 simu_ts_len: 500
 real_run: True
-mode: "ours"
+mode: "parallel_sp"
 profile_mode: "flashinfer"
 verbose: 0
 
-req_interval: 0.146
+req_interval: 0.377
+worker_num: 2
 query_interval: 1
-model: "llava"
+model: "diffusion_cnn"
 enable_slice: False
 
 trail_num: 20
