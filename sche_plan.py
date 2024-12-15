@@ -7,6 +7,7 @@ import sys
 import yaml
 sys.path.append("../../repos/x-transformers")
 sys.path.append("../../repos/diffusion_policy")
+sys.path.append("../../repos/icrt")
 from utils.util_func import max_below_threshold
 # import xformers
 
@@ -43,7 +44,7 @@ parser.add_argument('--profile_mode', default='base', help='profile_mode', type=
 parser.add_argument('--only_profile', default=False, help='only profile', type=bool)
 
 ## serving arguments
-parser.add_argument('--num_trails', default=100, help='request num', type=int)
+parser.add_argument('--num_trails', default=200, help='request num', type=int)
 parser.add_argument('--worker_num', default=2, help='worker num', type=int)
 
 ## others
@@ -274,7 +275,7 @@ def pattern_analyze_ad(task_plan):
 if __name__ == "__main__":
     print(args)
 
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(1)
 
     q_manager1 = SimuQueryManage(args)
     q_manager2 = SimuQueryManage(args)

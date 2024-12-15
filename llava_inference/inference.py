@@ -29,11 +29,13 @@ class LLaVa_engine:
         self.idx = idx
         self.text_max_seq_len = 256
         self.input_seq_len = args.input_seq_len + 576
+        self.n_replica = args.worker_num if args.mode == 'parallel_v2' else 1
+        print("self.n_replica: ", self.n_replica)
 
         # prepare caches for tensors
-        text = torch.randint(0, 256, (1, self.input_seq_len)).to("cuda")
-        img = torch.randn(1, 3, 336, 336).to(torch.bfloat16).to("cuda")
-        single_token = torch.randint(0, 256, (1, 1)).to("cuda")
+        text = [torch.randint(0, 256, (1, self.input_seq_len)).to("cuda") for i in range(self.n_replica)]
+        img = [torch.randn(1, 3, 336, 336).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
+        single_token = [torch.randint(0, 256, (1, 1)).to("cuda") for i in range(self.n_replica)]
         self.caches = { 'text': text,
                         'img': img,
                         'single_token': single_token}
@@ -48,9 +50,9 @@ class LLaVa_engine:
         self.streams = [torch.cuda.Stream() for _ in range(36)]
 
         # prepare cuda graphs
-        self.graphs = {'encode': torch.cuda.CUDAGraph(),
-                        'prefill': torch.cuda.CUDAGraph(),
-                        'decode': torch.cuda.CUDAGraph()}
+        self.graphs = {'encode': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
+                        'prefill': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
+                        'decode': [torch.cuda.CUDAGraph() for i in range(self.n_replica)]}
         self.generate_cuda_graphs()
         self.ours_graphs = {}
 
@@ -71,42 +73,53 @@ class LLaVa_engine:
         # [BUG]: I have to run the following command once to make the cuda graph generated properly
         # [FIXME]: The output caches of the graphs have not been designed yet
         # [FIXME]: The decode phase is static, which is just an approximate
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
+        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][0], 
                                                                     seq_len = self.text_max_seq_len, 
                                                                     kv_cache = None)
         del out
         del new_cache
-        with torch.cuda.graph(self.graphs['prefill'], stream=self.streams[1]):
-            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'], 
+        self.out1 = {}
+        self.new_cache1 = {}
+        for graph_id in range(self.n_replica):
+            with torch.cuda.graph(self.graphs['prefill'][graph_id], stream=self.streams[self.n_replica + graph_id]):
+                self.out1[graph_id], self.new_cache1[graph_id] = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][graph_id], 
                                                                                     seq_len = self.text_max_seq_len,
                                                                                     kv_cache = None)
 
-        self.graphs['prefill'].replay()
         torch.cuda.synchronize()
         # self.kv_cache = self.new_cache
         # print("self.kv_cache shape: ", self.kv_cache.attn_intermediates[0].cached_kv[0].shape)
         print("====== Graph for prefill generated ======")
 
         ## Make cuda graph for the decode phase
-        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], seq_len = self.text_max_seq_len, kv_cache = self.new_cache)
+        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(
+            self.caches['single_token'][0], 
+            seq_len = self.text_max_seq_len, 
+            kv_cache = self.new_cache1[0])
         del out
         del new_cache
-        with torch.cuda.graph(self.graphs['decode'], stream=self.streams[0]):
-            self.out, self.new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['single_token'], seq_len = self.text_max_seq_len, kv_cache = self.new_cache)
+        self.out2 = {}
+        self.new_cache2 = {}
+        for graph_id in range(self.n_replica):
+            with torch.cuda.graph(self.graphs['decode'][graph_id], stream=self.streams[graph_id]):
+               self.out2[graph_id], self.new_cache2[graph_id] = self.models['llm'].wrapped_decoder.make_graph(
+                        self.caches['single_token'][graph_id], 
+                        seq_len = self.text_max_seq_len, 
+                        kv_cache = self.new_cache1[graph_id])
 
-        self.graphs['decode'].replay()
         torch.cuda.synchronize()
         print("====== Graph for decode generated ======")
 
         ## Make cuda graph for the vision encoder
-        with torch.cuda.graph(self.graphs['encode'], stream=self.streams[2]):
-            out = self.models['vit'](self.caches['img'])
-            # print("out shape: ", out.shape)
-        self.graphs['encode'].replay()
+        self.vit_out = {}
+        for graph_id in range(self.n_replica):
+            with torch.cuda.graph(self.graphs['encode'][graph_id], stream=self.streams[self.n_replica*2 + graph_id]):
+                self.vit_out[graph_id] = self.models['vit'](self.caches['img'][graph_id])
+                # print("out shape: ", out.shape)
         torch.cuda.synchronize()
         print("====== Graph for vision generated ======")
 
-
+    # NOTE(ZSL): Not tested
     def generate_graph_group(self, ts_epd_num):
         graph_group = {}
         ts_encode_num, ts_prefill_num, ts_decode_num = ts_epd_num
@@ -175,18 +188,18 @@ class LLaVa_engine:
         torch.cuda.synchronize()
 
 
-    def run_V_cuda_graphs(self, num_trails=1, required_sync=True):
+    def run_V_cuda_graphs(self, num_trails=1, required_sync=True, graph_id=0):
         for i in range(num_trails):
-            self.graphs['encode'].replay()
+            self.graphs['encode'][graph_id].replay()
             if required_sync:
                 torch.cuda.synchronize()
 
 
-    def run_L_cuda_graphs(self, num_trails=1, out_seq_len=64, required_sync=True):
+    def run_L_cuda_graphs(self, num_trails=1, out_seq_len=64, required_sync=True, graph_id=0):
         for i in range(num_trails):
-            self.graphs['prefill'].replay()
+            self.graphs['prefill'][graph_id].replay()
             for token in range(out_seq_len-1):
-                self.graphs['decode'].replay()
+                self.graphs['decode'][graph_id].replay()
                 if required_sync:
                     torch.cuda.synchronize()
 
@@ -203,7 +216,7 @@ class LLaVa_engine:
 
 
     def run_single_request(self, durations, i):
-        worker_num = 2
+        worker_num = args.worker_num
         stream_id = i%worker_num
         req_start = time.time()
 
@@ -213,18 +226,18 @@ class LLaVa_engine:
         
         self.streams[stream_id].synchronize()
         duration = time.time() - req_start
-        print("Request duration: {:.3f} ms".format(duration*1000))
+        # print("Request duration: {:.3f} ms".format(duration*1000))
         durations.append(time.time() - req_start)
 
 
-    def run_single_request_v2(self, stream, start_event, end_event, required_sync=False):
+    def run_single_request_v2(self, stream, start_event, end_event, required_sync=False, graph_id=0):
         req_start = time.time()
         # print("Launch - {}".format(self.idx))
         
         with torch.cuda.stream(stream):
             start_event.record()
-            self.run_V_cuda_graphs(num_trails=1, required_sync=False)
-            self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
+            self.run_V_cuda_graphs(num_trails=1, required_sync=False, graph_id=graph_id)
+            self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False, graph_id=graph_id)
             end_event.record()
         if required_sync:
             stream.synchronize()
@@ -238,16 +251,29 @@ class LLaVa_engine:
         start = time.time()
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trails)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trails)]
-        for i in range(num_trails):
-            worker_num = 18
-            stream_id = i%worker_num
-            time.sleep(args.req_interval)
 
-            with torch.cuda.stream(self.streams[stream_id]):
-                start_events[i].record()
-                self.run_V_cuda_graphs(num_trails=1, required_sync=False)
-                self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False)
-                end_events[i].record()
+        threads = []
+        for i in range(num_trails):
+            graph_id = i%args.worker_num
+            t = threading.Timer(i * args.req_interval, 
+                                self.run_single_request_v2, 
+                                [self.streams[graph_id], start_events[i], end_events[i], False, graph_id])
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        # for i in range(num_trails):
+        #     worker_num = args.worker_num
+        #     stream_id = i%worker_num
+        #     time.sleep(args.req_interval)
+
+        #     with torch.cuda.stream(self.streams[stream_id]):
+        #         start_events[i].record()
+        #         self.run_V_cuda_graphs(num_trails=1, required_sync=False, graph_id=stream_id)
+        #         self.run_L_cuda_graphs(num_trails=1, out_seq_len=args.decode_len+args.prefill_len, required_sync=False, graph_id=stream_id)
+        #         end_events[i].record()
 
         torch.cuda.synchronize()
         total_duration = time.time() - start
@@ -320,6 +346,7 @@ class LLaVa_engine:
                 self.run_single_request(durations, 0)
             torch.cuda.synchronize()
             print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
+            print("Throughput: {:.3f}".format(1/np.mean(durations)))
 
         elif mode == 'pipe':
             start = time.time()
@@ -338,8 +365,9 @@ class LLaVa_engine:
 
         elif mode == 'parallel_v2':
             durations, total_duration = self.run_parallel_req_v2(num_trails=num_trails)
-            print("Query latency: {:.2f} ms".format(np.mean(durations)))
-            print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
+            print("Query latency: {:.3f} ms".format(np.mean(durations)))
+            print("Query duration: {:.3f}".format(total_duration*1000/num_trails))
+            print("Throughput: {:.3f}".format(1/(total_duration/num_trails)))
 
          # ours_ori is the original mode which still has decoding
         elif mode == 'ours_ori':
@@ -369,8 +397,8 @@ class LLaVa_engine:
             print("Throughput: {:.2f}".format(1/frame_interval))
 
         elif mode == 'ours':
-            graph_group = {'encode': self.graphs['encode'], 
-                            'prefill': self.graphs['prefill']}
+            graph_group = {'encode': self.graphs['encode'][0], 
+                            'prefill': self.graphs['prefill'][0]}
             start_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
             end_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
             for i in range(args.trail_num + args.warmup_num):

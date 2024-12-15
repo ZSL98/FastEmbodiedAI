@@ -7,6 +7,7 @@ import sys
 import time
 import math
 import threading
+import asyncio
 import torch.multiprocessing as mp
 from torch.multiprocessing import Process, Value, Array
 
@@ -37,14 +38,20 @@ class Diffusion_engine:
         if args.mode == 'seq':
             args.diffusion_stage_num = 1
 
-        img = torch.randn(2, 3, 96, 96).to(torch.bfloat16).to("cuda")
+        self.n_replica = args.diffusion_stage_num
+        if args.mode == 'parallel_v2':
+            self.n_replica = args.worker_num
+        
+        obs_num = 2
+        assert args.input_img_num*obs_num*args.perception_scale%1 == 0, "DiffusionPolicy Perception scaling warning"
+        img = [torch.randn(args.input_img_num*obs_num*args.perception_scale, 3, args.input_img_size, args.input_img_size).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
         if model_type == 'transformer':
-            trajectory = [torch.randn(1, 10, 2).to(torch.bfloat16).to("cuda") for i in range(args.diffusion_stage_num)]
-            cond = [torch.randn(1, 2, 66).to(torch.bfloat16).to("cuda") for i in range(args.diffusion_stage_num)]
+            trajectory = [torch.randn(1, args.input_traj_transformer_size, args.input_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
+            cond = [torch.randn(1, obs_num, args.cond_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
         elif model_type == 'cnn':
-            trajectory = [torch.randn(1, 16, 2).to(torch.bfloat16).to("cuda") for i in range(args.diffusion_stage_num)]
-            cond = [torch.randn(1, 132).to(torch.bfloat16).to("cuda") for i in range(args.diffusion_stage_num)]     
-        timestep = [torch.tensor([0], dtype=torch.long, device="cuda") for i in range(args.diffusion_stage_num)]
+            trajectory = [torch.randn(1, args.input_traj_cnn_size, args.input_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
+            cond = [torch.randn(1, obs_num*args.cond_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]     
+        timestep = [torch.tensor(0, dtype=torch.long, device="cuda") for i in range(self.n_replica)]
         self.caches = { 'img': img,
                         'trajectory': trajectory,
                         'timestep': timestep,
@@ -53,9 +60,22 @@ class Diffusion_engine:
         # prepare models
         resnet = models.resnet18().to(torch.bfloat16).to("cuda")
         if model_type == 'transformer':
-            backbone = DiffusionTransformer().to(torch.bfloat16).to("cuda")
+            backbone = DiffusionTransformer(
+                input_dim=args.input_dim,
+                output_dim=args.input_dim,
+                cond_dim=args.cond_dim,
+                n_emb=args.n_emb,
+                scaling=args.generation_scale
+            ).to(torch.bfloat16).to("cuda")
         elif model_type == 'cnn':
-            backbone = DiffusionCNN().to(torch.bfloat16).to("cuda")
+            backbone = DiffusionCNN(
+                input_dim=args.input_dim,
+                global_cond_dim=args.global_cond_dim,
+                scaling=args.generation_scale
+            ).to(torch.bfloat16).to("cuda")
+        
+        print("Perception params: %e" % sum(p.numel() for p in resnet.parameters()))
+        print("Generation params: %e" % sum(p.numel() for p in backbone.parameters()))
 
         self.models = {'resnet': resnet,
                        'backbone': backbone}
@@ -64,8 +84,8 @@ class Diffusion_engine:
         self.streams = [torch.cuda.Stream() for _ in range(36)]
 
         # prepare cuda graphs
-        self.graphs = {'resnet': torch.cuda.CUDAGraph(),
-                        'backbone': [torch.cuda.CUDAGraph() for i in range(args.diffusion_stage_num)]}
+        self.graphs = {'resnet': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
+                        'backbone': [torch.cuda.CUDAGraph() for i in range(self.n_replica)]}
         self.generate_cuda_graphs()
         self.ours_graphs = {}
 
@@ -73,19 +93,21 @@ class Diffusion_engine:
     def generate_cuda_graphs(self):
 
         ## Make cuda graph for the vision encoder
-        self.resnet_out = self.models['resnet'](self.caches['img'])
-        with torch.cuda.graph(self.graphs['resnet'], stream=self.streams[0]):
-            self.resnet_out = self.models['resnet'](self.caches['img'])
+        self.resnet_out = self.models['resnet'](self.caches['img'][0])
+        self.resnet_out = {}
+        for graph_id in range(self.n_replica):
+            with torch.cuda.graph(self.graphs['resnet'][graph_id], stream=self.streams[graph_id]):
+                self.resnet_out = self.models['resnet'](self.caches['img'][graph_id])
         torch.cuda.synchronize()
         print("====== Graph for resnet generated ======")
 
         self.backbone_out = self.models['backbone'](self.caches['trajectory'][0], self.caches['timestep'][0], self.caches['cond'][0])
         self.backbone_out = {}
-        for stage_id in range(args.diffusion_stage_num):
-            with torch.cuda.graph(self.graphs['backbone'][stage_id], stream=self.streams[stage_id+1]):
-                self.backbone_out[stage_id] = self.models['backbone'](self.caches['trajectory'][stage_id], 
-                                                                            self.caches['timestep'][stage_id], 
-                                                                            self.caches['cond'][stage_id])
+        for graph_id in range(self.n_replica):
+            with torch.cuda.graph(self.graphs['backbone'][graph_id], stream=self.streams[self.n_replica+graph_id]):
+                self.backbone_out[graph_id] = self.models['backbone'](self.caches['trajectory'][graph_id], 
+                                                                            self.caches['timestep'][graph_id], 
+                                                                            self.caches['cond'][graph_id])
             
         torch.cuda.synchronize()
         print("====== Graph for backbone generated ======")
@@ -93,23 +115,23 @@ class Diffusion_engine:
 
     def run_cuda_graphs(self, num_trails):
         for i in range(num_trails):
-            self.graphs['resnet'].replay()
+            self.graphs['resnet'][0].replay()
             for diffusion_step in range(args.diffusion_step):
                 self.graphs['backbone'][0].replay()
         torch.cuda.synchronize()
 
 
-    def run_V_cuda_graphs(self, num_trails=1, required_sync=True):
+    def run_V_cuda_graphs(self, num_trails=1, required_sync=True, graph_id=0):
         for i in range(num_trails):
-            self.graphs['resnet'].replay()
+            self.graphs['resnet'][graph_id].replay()
             if required_sync:
                 torch.cuda.synchronize()
 
 
-    def run_L_cuda_graphs(self, num_trails=1, diffusion_step=64, required_sync=True):
+    def run_L_cuda_graphs(self, num_trails=1, diffusion_step=64, required_sync=True, graph_id=0):
         for i in range(num_trails):
             for step in range(diffusion_step):
-                self.graphs['backbone'][0].replay()
+                self.graphs['backbone'][graph_id].replay()
                 if required_sync:
                     torch.cuda.synchronize()
 
@@ -133,18 +155,18 @@ class Diffusion_engine:
         
         self.streams[stream_id].synchronize()
         duration = time.time() - req_start
-        print("Request duration: {:.3f} ms".format(duration*1000))
+        # print("Request duration: {:.3f} ms".format(duration*1000))
         durations.append(time.time() - req_start)
 
 
-    def run_single_request_v2(self, stream, start_event, end_event, required_sync=False):
+    def run_single_request_v2(self, stream, start_event, end_event, required_sync=False, graph_id=0):
         req_start = time.time()
         # print("Launch - {}".format(self.idx))
         
         with torch.cuda.stream(stream):
             start_event.record()
-            self.run_V_cuda_graphs(num_trails=1, required_sync=False)
-            self.run_L_cuda_graphs(num_trails=1, diffusion_step=args.diffusion_step, required_sync=False)
+            self.run_V_cuda_graphs(num_trails=1, required_sync=False, graph_id=graph_id)
+            self.run_L_cuda_graphs(num_trails=1, diffusion_step=args.diffusion_step, required_sync=False, graph_id=graph_id)
             end_event.record()
         if required_sync:
             stream.synchronize()
@@ -158,17 +180,17 @@ class Diffusion_engine:
         start = time.time()
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trails)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_trails)]
+        threads = []
         for i in range(num_trails):
-            worker_num = 18
-            stream_id = i%worker_num
-            time.sleep(args.req_interval)
+            graph_id = i%args.worker_num
+            t = threading.Timer(i * args.req_interval, 
+                                self.run_single_request_v2, 
+                                [self.streams[graph_id], start_events[i], end_events[i], False, graph_id])
+            t.start()
+            threads.append(t)
 
-            with torch.cuda.stream(self.streams[stream_id]):
-                start_events[i].record()
-                self.run_V_cuda_graphs(num_trails=1, required_sync=False)
-                self.run_L_cuda_graphs(num_trails=1, diffusion_step=args.diffusion_step//args.diffusion_stage_num, required_sync=False)
-                end_events[i].record()
-
+        for t in threads:
+            t.join()
         torch.cuda.synchronize()
         total_duration = time.time() - start
         durations = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
@@ -240,6 +262,7 @@ class Diffusion_engine:
                 self.run_single_request(durations, 0)
             torch.cuda.synchronize()
             print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
+            print("Throughput: {:.3f}".format(1/np.mean(durations)))
 
         elif mode == 'pipe':
             start = time.time()
@@ -258,8 +281,9 @@ class Diffusion_engine:
 
         elif mode == 'parallel_v2':
             durations, total_duration = self.run_parallel_req_v2(num_trails=num_trails)
-            print("Query latency: {:.2f} ms".format(np.mean(durations)))
-            print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
+            print("Query latency: {:.3f} ms".format(np.mean(durations)))
+            print("Query duration: {:.3f}".format(total_duration*1000/num_trails))
+            print("Throughput: {:.3f}".format(1/(total_duration/num_trails)))
 
             
         elif mode == 'ours':
@@ -275,7 +299,7 @@ class Diffusion_engine:
                 # First execute the encoder (resnet18), then synchronize,
                 # then run multiple diffusion iterations in parallel
                 with torch.cuda.stream(self.streams[0]):
-                    self.graphs['resnet'].replay()
+                    self.graphs['resnet'][0].replay()
                 torch.cuda.synchronize()
                 
                 backbone_streams = []
@@ -309,7 +333,7 @@ class Diffusion_engine:
 
             frame_interval = (time.time() - start_time) / args.trail_num
             print("Frame interval: {:.4f} s".format(frame_interval))
-            print("Throughput: {:.2f}".format(1/frame_interval))
+            print("Throughput: {:.3f}".format(1/frame_interval))
 
         elif mode == 'profile':
             raise NotImplementedError
