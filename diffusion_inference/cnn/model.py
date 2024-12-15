@@ -19,7 +19,8 @@ class DiffusionCNN(nn.Module):
         kernel_size=5,
         n_groups=8,
         cond_predict_scale=True,
-        data_type=torch.bfloat16
+        data_type=torch.bfloat16,
+        scaling=1
         ):
 
         super().__init__()

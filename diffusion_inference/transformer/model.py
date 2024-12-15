@@ -27,6 +27,7 @@ class DiffusionTransformer(nn.Module):
         time_as_cond=True,
         obs_as_cond=True,
         n_cond_layers=0,
+        scaling=1
         ):
 
         super().__init__()
