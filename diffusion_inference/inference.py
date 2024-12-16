@@ -34,6 +34,7 @@ class Diffusion_engine:
                  model_type='transformer'):
         self.idx = idx
 
+        args.diffusion_step = int(args.generation_scale * args.diffusion_step)
         # prepare caches for tensors
         if args.mode == 'seq':
             args.diffusion_stage_num = 1
@@ -43,8 +44,8 @@ class Diffusion_engine:
             self.n_replica = args.worker_num
         
         obs_num = 2
-        assert args.input_img_num*obs_num*args.perception_scale%1 == 0, "DiffusionPolicy Perception scaling warning"
-        img = [torch.randn(args.input_img_num*obs_num*args.perception_scale, 3, args.input_img_size, args.input_img_size).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
+        # assert args.input_img_num*obs_num*args.perception_scale%1 == 0, "DiffusionPolicy Perception scaling warning"
+        img = [torch.randn(int(args.input_img_num*obs_num*args.perception_scale), 3, args.input_img_size, args.input_img_size).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
         if model_type == 'transformer':
             trajectory = [torch.randn(1, args.input_traj_transformer_size, args.input_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
             cond = [torch.randn(1, obs_num, args.cond_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
@@ -64,14 +65,12 @@ class Diffusion_engine:
                 input_dim=args.input_dim,
                 output_dim=args.input_dim,
                 cond_dim=args.cond_dim,
-                n_emb=args.n_emb,
-                scaling=args.generation_scale
+                n_emb=args.n_emb
             ).to(torch.bfloat16).to("cuda")
         elif model_type == 'cnn':
             backbone = DiffusionCNN(
                 input_dim=args.input_dim,
-                global_cond_dim=args.global_cond_dim,
-                scaling=args.generation_scale
+                global_cond_dim=args.global_cond_dim
             ).to(torch.bfloat16).to("cuda")
         
         print("Perception params: %e" % sum(p.numel() for p in resnet.parameters()))

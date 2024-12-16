@@ -23,16 +23,18 @@ class llama(nn.Module):
         autoregressive_wrapper_kwargs: dict = dict(
             pad_value = 0,
             ignore_index = -100
-        )
+        ),
+        scaling=1
         ):
 
         super().__init__()
+        # assert decoder_depth*scaling%1==0, "llama layer num should be integer"
         self.decoder = TransformerWrapper(
             num_tokens = num_text_tokens + 1,
             max_seq_len = text_max_seq_len,
             attn_layers = Decoder(
                 dim = dim,
-                depth = decoder_depth,
+                depth = int(decoder_depth*scaling),
                 dim_head = attn_dim_head,
                 heads = attn_heads,
                 kv_heads = kv_heads,

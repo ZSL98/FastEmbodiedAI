@@ -56,12 +56,15 @@ class OpenVLA_engine:
                         'single_token': single_token}
 
         # prepare models
-        dinov2 = DINOv2().to("cuda")
-        siglip = SigLIP().to("cuda")
-        llm = llama().to("cuda")
+        dinov2 = DINOv2(scaling=args.perception_scale).to("cuda")
+        siglip = SigLIP(scaling=args.perception_scale).to("cuda")
+        llm = llama(scaling=args.generation_scale).to("cuda")
         self.models = {'vit1': dinov2, 
                        'vit2': siglip,
                        'llm': llm}
+    
+        print("Perception params: %e" % (sum(p.numel() for p in dinov2.parameters())+sum(p.numel() for p in siglip.parameters())))
+        print("Generation params: %e" % sum(p.numel() for p in llm.parameters()))
 
         # prepare some streams to use
         self.streams = [torch.cuda.Stream() for _ in range(36)]

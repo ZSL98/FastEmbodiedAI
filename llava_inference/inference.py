@@ -41,10 +41,13 @@ class LLaVa_engine:
                         'single_token': single_token}
 
         # prepare models
-        vit = vision_transformer().to("cuda")
-        llm = llama().to("cuda")
+        vit = vision_transformer(scaling=args.perception_scale).to("cuda")
+        llm = llama(scaling=args.generation_scale).to("cuda")
         self.models = {'vit': vit, 
                        'llm': llm}
+        
+        print("Perception params: %e" % sum(p.numel() for p in vit.parameters()))
+        print("Generation params: %e" % sum(p.numel() for p in llm.parameters()))
 
         # prepare some streams to use
         self.streams = [torch.cuda.Stream() for _ in range(36)]
