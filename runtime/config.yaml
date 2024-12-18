@@ -35,7 +35,7 @@ verbose: 0
 req_interval: 0.1362
 worker_num: 3
 query_interval: 1
-model: "diffusion_transformer"
+model: "openvla"
 enable_slice: False
 
 trail_num: 20

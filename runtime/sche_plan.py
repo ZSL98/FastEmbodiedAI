@@ -5,7 +5,7 @@ import torch
 import argparse
 import sys
 import yaml
-sys.path.append("../../repos/x-transformers")
+sys.path.append("../third_party/x-transformers")
 sys.path.append("../../repos/diffusion_policy")
 sys.path.append("../../repos/icrt")
 from utils.util_func import max_below_threshold
