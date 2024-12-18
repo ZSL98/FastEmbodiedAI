@@ -1,0 +1,3 @@
+[submodule "third_party/x-transformers"]
+	path = third_party/x-transformers
+	url = https://github.com/ZSL98/x-transformers.git
