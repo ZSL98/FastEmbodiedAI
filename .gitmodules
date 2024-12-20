@@ -1,3 +1,6 @@
 [submodule "third_party/x-transformers"]
 	path = third_party/x-transformers
 	url = https://github.com/ZSL98/x-transformers.git
+[submodule "third_party/diffusion_policy"]
+	path = third_party/diffusion_policy
+	url = https://github.com/ZSL98/diffusion_policy.git

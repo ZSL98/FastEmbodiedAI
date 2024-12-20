@@ -346,7 +346,7 @@ class LLaVa_engine:
         print(durations)
         assert durations[0] > durations[1], "V is finished before L, adjust the scale in run_V_cuda_graphs()"
 
-        return total_duration
+        return durations[1]
 
     def run_parallel_req(self, num_trails):
 
