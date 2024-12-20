@@ -29,7 +29,7 @@ class LLaVa_engine:
     def __init__(self, idx = 0):
         self.idx = idx
         self.text_max_seq_len = 256
-        self.input_seq_len = args.input_seq_len + 576
+        self.input_seq_len = args.input_seq_len + 576 + 10
         self.n_replica = 1
         if args.mode == 'parallel_v2':
             self.n_replica = args.worker_num
