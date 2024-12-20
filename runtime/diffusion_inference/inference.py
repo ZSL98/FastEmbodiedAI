@@ -16,12 +16,14 @@ import torch.cuda.profiler as profiler
 
 from .transformer.model import DiffusionTransformer
 from .cnn.model import DiffusionCNN
+from diffusion_policy.common.pytorch_util import split_with_skew, split_with_skew_no_acc
 
 from beartype import beartype
 from beartype.typing import Optional, Union, Tuple, Dict, Any
 from einops import rearrange, repeat, reduce, pack, unpack
 from einops.layers.torch import Rearrange
 from sche_plan import args, pattern_analyze
+from contextlib import nullcontext
 
 
 class Diffusion_engine:
@@ -120,20 +122,47 @@ class Diffusion_engine:
         torch.cuda.synchronize()
 
 
-    def run_V_cuda_graphs(self, num_trails=1, required_sync=True, graph_id=0):
-        for i in range(num_trails):
-            self.graphs['resnet'][graph_id].replay()
-            if required_sync:
-                torch.cuda.synchronize()
-
-
-    def run_L_cuda_graphs(self, num_trails=1, diffusion_step=64, required_sync=True, graph_id=0):
-        for i in range(num_trails):
-            for step in range(diffusion_step):
-                self.graphs['backbone'][graph_id].replay()
+    def run_V_cuda_graphs(self, num_trails=1, required_sync=True, 
+                          graph_id=0, stream=None, start_event=None, end_event=None):
+        
+        context = torch.cuda.stream(stream) if stream is not None else nullcontext()
+        with context:
+            if start_event is not None:
+                start_event.record(stream)
+            for i in range(num_trails):
+                self.graphs['resnet'][graph_id].replay()
                 if required_sync:
                     torch.cuda.synchronize()
+            if end_event is not None:
+                end_event.record(stream)
 
+
+    def run_L_cuda_graphs(self, num_trails=1, diffusion_step=64, required_sync=True, 
+                          graph_id=0, stream=None, start_event=None, end_event=None, slice_list=None):
+        if not isinstance(stream, list):
+            context = torch.cuda.stream(stream) if stream is not None else nullcontext()
+            with context:
+                if start_event is not None:
+                    start_event.record(stream)
+                for i in range(num_trails):
+                    for step in range(diffusion_step):
+                        self.graphs['backbone'][graph_id].replay()
+                        if required_sync:
+                            torch.cuda.synchronize()
+                if end_event is not None:
+                    end_event.record(stream)
+        else:
+            assert slice_list is not None, "slice_list should not be none"
+            if start_event is not None:
+                start_event.record()
+            for i in range(num_trails):
+                for id, ths_stream in enumerate(stream):
+                    with torch.cuda.stream(ths_stream):
+                        for _ in range(slice_list[id]):
+                            self.graphs['backbone'][id].replay()
+            if end_event is not None:
+                end_event.record()
+                    
 
     def run_VL_ms(self):
         with torch.cuda.stream(self.streams[0]):
@@ -196,6 +225,51 @@ class Diffusion_engine:
 
         return durations, total_duration
 
+    def run_VL_decouple(self, num_trails, parallel_L=False):
+
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+        start = time.time()
+        scale = 25
+        thread_V = threading.Thread(target=self.run_V_cuda_graphs, args=(num_trails*scale, 
+                                                                        False, 0, 
+                                                                        self.streams[0], 
+                                                                        start_events[0],
+                                                                        end_events[0]))
+        if parallel_L == False:
+            # Prefill and decode are sequential and then parallelized with V
+            thread_L = threading.Thread(target=self.run_L_cuda_graphs, args=(num_trails, 
+                                                                            args.diffusion_step, 
+                                                                            False, 0,
+                                                                            self.streams[1],
+                                                                            start_events[1],
+                                                                            end_events[1]))
+        else:
+            # Only a prefill is parallelized with V
+            slice_list = split_with_skew_no_acc(args.diffusion_step, args.diffusion_stage_num, args.diffusion_slice_skewness)
+            print("slice_list: ", slice_list)
+            thread_L = threading.Thread(target=self.run_L_cuda_graphs, args=(num_trails,
+                                                                            args.diffusion_step, 
+                                                                            False, 0,
+                                                                            self.streams[1:len(slice_list)+1],
+                                                                            start_events[1],
+                                                                            end_events[1],
+                                                                            slice_list))
+
+        thread_V.start()
+        thread_L.start()
+
+        thread_V.join()
+        thread_L.join()
+
+        torch.cuda.synchronize()
+        total_duration = time.time() - start
+
+        durations = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
+        print(durations)
+        assert durations[0] > durations[1], "V is finished before L, adjust the scale in run_V_cuda_graphs()"
+
+        return durations[1]/1000
 
     def run_parallel_req(self, num_trails):
 
@@ -284,10 +358,20 @@ class Diffusion_engine:
             print("Query duration: {:.3f}".format(total_duration*1000/num_trails))
             print("Throughput: {:.3f}".format(1/(total_duration/num_trails)))
 
+        elif mode == 'decouple':
+            total_duration = self.run_VL_decouple(num_trails=num_trails, parallel_L=False)
+            print("OUT throughput: {:.2f}".format(num_trails/total_duration))
+            print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
+
+        elif mode == 'ours_decouple':
+            total_duration = self.run_VL_decouple(num_trails=num_trails, parallel_L=True)
+            print("OUT throughput: {:.2f}".format(num_trails/total_duration))
+            print("Query duration: {:.2f}".format(total_duration*1000/num_trails))
             
         elif mode == 'ours':
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
+            slice_list = split_with_skew_no_acc(args.diffusion_step, args.diffusion_stage_num, args.diffusion_slice_skewness)
             for i in range(args.trail_num + args.warmup_num):
                 if i == args.warmup_num:
                     start_time = time.time()
@@ -302,21 +386,23 @@ class Diffusion_engine:
                 torch.cuda.synchronize()
                 
                 backbone_streams = []
-                # # graph-first graph launching
-                # for j, graph_name in enumerate(self.graphs['backbone']):
-                #     stream = self.streams[j+1]
-                #     with torch.cuda.stream(stream):
-                #         for diffusion_step in range(args.diffusion_step // args.diffusion_stage_num):
-                #             self.graphs['backbone'][j].replay()
-                #     backbone_streams.append(stream)
-
-                # iteration-first graph launching
-                for diffusion_step in range(args.diffusion_step // args.diffusion_stage_num):
-                    for j, graph_name in enumerate(self.graphs['backbone']):
-                        stream = self.streams[j+1]
-                        with torch.cuda.stream(stream):
+                # print("slice_list: ", slice_list)
+                # graph-first graph launching
+                for j, graph_name in enumerate(self.graphs['backbone']):
+                    stream = self.streams[j+1]
+                    with torch.cuda.stream(stream):
+                        # for diffusion_step in range(args.diffusion_step // args.diffusion_stage_num):
+                        for diffusion_step in range(slice_list[j]):
                             self.graphs['backbone'][j].replay()
-                    backbone_streams.append(stream)                
+                    backbone_streams.append(stream)
+
+                # # iteration-first graph launching
+                # for diffusion_step in range(args.diffusion_step // args.diffusion_stage_num):
+                #     for j, graph_name in enumerate(self.graphs['backbone']):
+                #         stream = self.streams[j+1]
+                #         with torch.cuda.stream(stream):
+                #             self.graphs['backbone'][j].replay()
+                #     backbone_streams.append(stream)                
 
                 # Synchronize all backbone streams before recording end_event
                 for stream in backbone_streams:
@@ -386,7 +472,7 @@ def diffusion_run(sche_plan=None, mode='profile', model_type='transformer'):
         e = Diffusion_engine(model_type=model_type)
         e.run_benchmarks(mode=mode,
                          use_cuda_graphs=True,
-                         num_trails=100,
+                         num_trails=20,
                          sche_plan=sche_plan)
 
     torch.cuda.synchronize()

@@ -9,15 +9,11 @@ decode_len: 6
 # For DiffusionPolicy
 diffusion_step: 100
 diffusion_stage_num: 5
-
-input_img_num: 4       #[1, 2, 4]
-input_img_size: 84     #[96, 84, 84]
 input_traj_cnn_size: 16
 input_traj_transformer_size: 10
-input_cond_size: 274   #[66, 137, 274]
+input_img_num: 4       #[1, 2, 4]
+input_img_size: 84     #[96, 84, 84]
 input_dim: 20          #[2, 10, 20]
-
-# For DiffusionPolicy model
 cond_dim: 274          #[66, 137, 274]
 n_emb: 768             #[256, 256, 768]
 global_cond_dim: 548   #[132, 274, 548]
@@ -25,19 +21,20 @@ global_cond_dim: 548   #[132, 274, 548]
 # For scaling
 perception_scale: 0.5
 generation_scale: 0.5
-perception_slice_num: 2
-generation_slice_num: 4
+perception_slice_num: 2  # only for LLMs
+generation_slice_num: 4  # only for LLMs
+diffusion_slice_skewness: 0
 
 simu_ts_len: 500
 real_run: True
-mode: "ours"
+mode: "decouple"
 profile_mode: "flashinfer"
 verbose: 0
 
 req_interval: 0.1362
 worker_num: 3
 query_interval: 1
-model: "llava"
+model: "diffusion_cnn"
 enable_slice: False
 
 trail_num: 20
