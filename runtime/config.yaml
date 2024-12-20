@@ -25,17 +25,19 @@ global_cond_dim: 548   #[132, 274, 548]
 # For scaling
 perception_scale: 0.5
 generation_scale: 0.5
+perception_slice_num: 2
+generation_slice_num: 4
 
 simu_ts_len: 500
 real_run: True
-mode: "seq"
+mode: "ours"
 profile_mode: "flashinfer"
 verbose: 0
 
 req_interval: 0.1362
 worker_num: 3
 query_interval: 1
-model: "openvla"
+model: "llava"
 enable_slice: False
 
 trail_num: 20

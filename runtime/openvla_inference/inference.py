@@ -45,7 +45,13 @@ class OpenVLA_engine:
         self.idx = idx
         self.text_max_seq_len = 256
         self.input_seq_len = args.input_seq_len + 512   #text length + vision latent length=256*2
-        self.n_replica = args.worker_num if args.mode == 'parallel_v2' else 1
+        self.n_replica = 1
+        if args.mode == 'parallel_v2':
+            self.n_replica = args.worker_num
+        elif args.mode == 'ours':
+            self.n_replica = max(args.perception_slice_num, args.generation_slice_num)
+            args.perception_scale = args.perception_scale / args.perception_slice_num
+            args.generation_scale = args.generation_scale / args.generation_slice_num
         print("self.n_replica: ", self.n_replica)
 
         # prepare caches for tensors
@@ -378,7 +384,36 @@ class OpenVLA_engine:
         total_duration = time.time() - start
 
         return durations, total_duration
+    
+    def run_ours(self):
+        graph_group = {}
+        for replica_L in range(args.generation_slice_num):
+            graph_group['prefill_{}'.format(replica_L)] = self.graphs['prefill'][replica_L]
+        for replica_V in range(args.perception_slice_num):
+            graph_group['dinov2_{}'.format(replica_V)] = self.graphs['vit1'][replica_V]
+            graph_group['siglip_{}'.format(replica_V)] = self.graphs['vit2'][replica_V]
 
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(len(graph_group))]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(len(graph_group))]
+        for i in range(args.trail_num + args.warmup_num):
+            if i == args.warmup_num:
+                start_time = time.time()
+
+            for j, graph_name in enumerate(graph_group):
+                with torch.cuda.stream(self.streams[j]):
+                    if i == args.warmup_num:
+                        start_events[j].record()
+                    graph_group[graph_name].replay()
+                    if i == args.warmup_num:
+                        end_events[j].record()
+            torch.cuda.synchronize()
+
+            if i == args.warmup_num:
+                duration = [s.elapsed_time(e) for s, e in zip(start_events[:j+1], end_events[:j+1])]
+                print("Duration of graphs: ", duration)
+
+        total_duration = time.time() - start_time
+        return total_duration
 
     def run_ts(self, task_plan):
         if args.profile_mode == 'base':
@@ -454,6 +489,11 @@ class OpenVLA_engine:
             print("Query duration: {:.3f}".format(total_duration*1000/num_trails))
             print("Throughput: {:.3f}".format(1/(total_duration/num_trails)))
 
+        elif mode == 'ours':
+            total_duration = self.run_ours()
+            print("Query duration: {:.3f}".format(total_duration*1000/num_trails))
+            print("Throughput: {:.3f}".format(1/(total_duration/num_trails)))
+
         # ours_ori is the original mode which still has decoding
         elif mode == 'ours_ori':
             print("Prepare required tensors and cuda graphs.")
@@ -479,33 +519,6 @@ class OpenVLA_engine:
             
             frame_interval = (time.time() - start_time) / args.trail_num
             print("Total duration: {:.4f} s".format(frame_interval))
-            print("Throughput: {:.2f}".format(1/frame_interval))
-            
-        elif mode == 'ours':
-            graph_group = {'prefill': self.graphs['prefill'][0],
-                            'dinov2': self.graphs['vit1'][0], 
-                            'siglip': self.graphs['vit2'][0]}
-            start_events = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
-            end_events = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
-            for i in range(args.trail_num + args.warmup_num):
-                if i == args.warmup_num:
-                    start_time = time.time()
-
-                for j, graph_name in enumerate(graph_group):
-                    with torch.cuda.stream(self.streams[j]):
-                        if i == args.warmup_num:
-                            start_events[j].record()
-                        graph_group[graph_name].replay()
-                        if i == args.warmup_num:
-                            end_events[j].record()
-                torch.cuda.synchronize()
-
-                if i == args.warmup_num:
-                    duration = [s.elapsed_time(e) for s, e in zip(start_events[:j+1], end_events[:j+1])]
-                    print("Duration of graphs: ", duration)
-
-            frame_interval = (time.time() - start_time) / args.trail_num
-            print("Frame interval: {:.4f} s".format(frame_interval))
             print("Throughput: {:.2f}".format(1/frame_interval))
 
         elif mode == 'profile':
