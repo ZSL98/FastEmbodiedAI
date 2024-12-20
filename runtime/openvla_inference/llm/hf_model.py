@@ -204,7 +204,7 @@ for name, param in model2.named_parameters():
         # Set the initialized parameter back to the module
         setattr(parent_module, param_name, new_param)
 
-device_map = infer_auto_device_map(model2)
+device_map = infer_auto_device_map(model2, max_memory={0: "4GiB", "cpu": "20GiB"})
 print(f"Device map: {device_map}")
 
 model2 = dispatch_model(model2, device_map=device_map)

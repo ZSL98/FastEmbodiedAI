@@ -3,6 +3,8 @@ from torch import nn
 from beartype import beartype
 from beartype.typing import Optional, Union, Tuple, Dict, Any
 
+import sys
+sys.path.append("../../../third_party/x-transformers")
 from x_transformers import Encoder, Decoder, TransformerWrapper, AutoregressiveWrapper
 
 class llama(nn.Module):
