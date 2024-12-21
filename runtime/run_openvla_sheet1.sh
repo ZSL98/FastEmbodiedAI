@@ -38,7 +38,7 @@ elif [ "$MODEL_NAME" == "diffusion_cnn" ]; then
     do
     if [ -f "$file" ]; then
         sed -i "s/diffusion_step: [0-9]\+/diffusion_step: 40/" $file
-        sed -i "s/diffusion_stage_num: [0-9]\+/diffusion_stage_num: 4/" $file
+        sed -i "s/diffusion_stage_num: [0-9]\+/diffusion_stage_num: 5/" $file
         echo "Updated diffusion_step to 40 in $file"
     else
         echo "Warning: $file not found, cannot update diffusion_step."
@@ -118,9 +118,9 @@ done
 
 echo "All iterations are complete. Output saved to $LOG_FILE." >> $LOG_FILE
 
-# 计算 Frame interval 的平均值
-average_query_duration=$(awk '/Frame interval:/ {duration_sum += $3; count++} END {print duration_sum/count}' $LOG_FILE)
-average_query_duration_seconds=$(printf "%.8f" $(echo "scale=8; $average_query_duration" | bc))
+# 计算 Query duration 的平均值
+average_query_duration=$(awk '/Query duration:/ {duration_sum += $3; count++} END {print duration_sum/count}' $LOG_FILE)
+average_query_duration_seconds=$(printf "%.8f" $(echo "scale=8; $average_query_duration / 1000" | bc))
 
 # 输出平均值到日志文件
 echo "Average Query Duration: $average_query_duration s ($average_query_duration_seconds seconds)" >> $LOG_FILE
@@ -130,68 +130,6 @@ config_file="config_parallel.yaml"
 sed -i "s/req_interval: [0-9.]\+/req_interval: $average_query_duration_seconds/" $config_file
 
 echo "config_parallel.yaml updated with new req_interval: $average_query_duration_seconds."
-
-if (( $(echo "$average_query_duration_seconds > 0" | bc -l) )); then
-    throughput=$(printf "%.8f" $(echo "scale=8; 1 / $average_query_duration_seconds" | bc))
-    echo "Throughput: $throughput requests/second" >> $LOG_FILE
-else
-    echo "Throughput: Infinite (duration zero)" >> $LOG_FILE
-fi
-
-
-# ==========================================================================================================
-# ============================================ Decouple ====================================================
-# 定义日志文件
-LOG_FILE="${MODEL_NAME}_decouple.log"
-
-# Decouple 运行 5 次命令
-for i in {1..5}
-do
-    echo "Running iteration $i..." >> $LOG_FILE
-    python sche_plan.py --config ./config_decouple.yaml >> $LOG_FILE 2>&1
-    echo "Iteration $i completed." >> $LOG_FILE
-    echo "--------------------------------------" >> $LOG_FILE
-done
-
-echo "All iterations are complete. Output saved to $LOG_FILE." >> $LOG_FILE
-
-# 计算 Query duration 的平均值
-average_query_duration=$(awk '/Query duration:/ {duration_sum += $3; count++} END {print duration_sum/count}' $LOG_FILE)
-average_query_duration_seconds=$(printf "%.8f" $(echo "scale=8; $average_query_duration/1000" | bc))
-
-# 输出平均值到日志文件
-echo "Average Query Duration: $average_query_duration ms ($average_query_duration_seconds seconds)" >> $LOG_FILE
-
-if (( $(echo "$average_query_duration_seconds > 0" | bc -l) )); then
-    throughput=$(printf "%.8f" $(echo "scale=8; 1 / $average_query_duration_seconds" | bc))
-    echo "Throughput: $throughput requests/second" >> $LOG_FILE
-else
-    echo "Throughput: Infinite (duration zero)" >> $LOG_FILE
-fi
-
-
-# ==========================================================================================================
-# ======================================= ours_Decouple ====================================================
-# 定义日志文件
-LOG_FILE="${MODEL_NAME}_ours_decouple.log"
-
-# Ours_Decouple 运行 5 次命令
-for i in {1..5}
-do
-    echo "Running iteration $i..." >> $LOG_FILE
-    python sche_plan.py --config ./config_ours_decouple.yaml >> $LOG_FILE 2>&1
-    echo "Iteration $i completed." >> $LOG_FILE
-    echo "--------------------------------------" >> $LOG_FILE
-done
-
-echo "All iterations are complete. Output saved to $LOG_FILE." >> $LOG_FILE
-
-# 计算 Query duration 的平均值
-average_query_duration=$(awk '/Query duration:/ {duration_sum += $3; count++} END {print duration_sum/count}' $LOG_FILE)
-average_query_duration_seconds=$(printf "%.8f" $(echo "scale=8; $average_query_duration/1000" | bc))
-
-# 输出平均值到日志文件
-echo "Average Query Duration: $average_query_duration ms ($average_query_duration_seconds seconds)" >> $LOG_FILE
 
 if (( $(echo "$average_query_duration_seconds > 0" | bc -l) )); then
     throughput=$(printf "%.8f" $(echo "scale=8; 1 / $average_query_duration_seconds" | bc))
@@ -247,3 +185,65 @@ do
 
     echo "====================================" >> $LOG_FILE
 done
+
+
+# # ==========================================================================================================
+# # ============================================ Decouple ====================================================
+# # 定义日志文件
+# LOG_FILE="${MODEL_NAME}_decouple.log"
+
+# # Decouple 运行 5 次命令
+# for i in {1..5}
+# do
+#     echo "Running iteration $i..." >> $LOG_FILE
+#     python sche_plan.py --config ./config_decouple.yaml >> $LOG_FILE 2>&1
+#     echo "Iteration $i completed." >> $LOG_FILE
+#     echo "--------------------------------------" >> $LOG_FILE
+# done
+
+# echo "All iterations are complete. Output saved to $LOG_FILE." >> $LOG_FILE
+
+# # 计算 Query duration 的平均值
+# average_query_duration=$(awk '/Query duration:/ {duration_sum += $3; count++} END {print duration_sum/count}' $LOG_FILE)
+# average_query_duration_seconds=$(printf "%.8f" $(echo "scale=8; $average_query_duration/1000" | bc))
+
+# # 输出平均值到日志文件
+# echo "Average Query Duration: $average_query_duration ms ($average_query_duration_seconds seconds)" >> $LOG_FILE
+
+# if (( $(echo "$average_query_duration_seconds > 0" | bc -l) )); then
+#     throughput=$(printf "%.8f" $(echo "scale=8; 1 / $average_query_duration_seconds" | bc))
+#     echo "Throughput: $throughput requests/second" >> $LOG_FILE
+# else
+#     echo "Throughput: Infinite (duration zero)" >> $LOG_FILE
+# fi
+
+
+# # ==========================================================================================================
+# # ======================================= ours_Decouple ====================================================
+# # 定义日志文件
+# LOG_FILE="${MODEL_NAME}_ours_decouple.log"
+
+# # Ours_Decouple 运行 5 次命令
+# for i in {1..5}
+# do
+#     echo "Running iteration $i..." >> $LOG_FILE
+#     python sche_plan.py --config ./config_ours_decouple.yaml >> $LOG_FILE 2>&1
+#     echo "Iteration $i completed." >> $LOG_FILE
+#     echo "--------------------------------------" >> $LOG_FILE
+# done
+
+# echo "All iterations are complete. Output saved to $LOG_FILE." >> $LOG_FILE
+
+# # 计算 Query duration 的平均值
+# average_query_duration=$(awk '/Query duration:/ {duration_sum += $3; count++} END {print duration_sum/count}' $LOG_FILE)
+# average_query_duration_seconds=$(printf "%.8f" $(echo "scale=8; $average_query_duration/1000" | bc))
+
+# # 输出平均值到日志文件
+# echo "Average Query Duration: $average_query_duration ms ($average_query_duration_seconds seconds)" >> $LOG_FILE
+
+# if (( $(echo "$average_query_duration_seconds > 0" | bc -l) )); then
+#     throughput=$(printf "%.8f" $(echo "scale=8; 1 / $average_query_duration_seconds" | bc))
+#     echo "Throughput: $throughput requests/second" >> $LOG_FILE
+# else
+#     echo "Throughput: Infinite (duration zero)" >> $LOG_FILE
+# fi

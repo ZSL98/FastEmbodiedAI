@@ -275,7 +275,7 @@ def pattern_analyze_ad(task_plan):
 if __name__ == "__main__":
     print(args)
 
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
 
     q_manager1 = SimuQueryManage(args)
     q_manager2 = SimuQueryManage(args)

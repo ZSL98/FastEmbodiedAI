@@ -7,7 +7,7 @@ prefill_len: 1
 decode_len: 6
 
 # For DiffusionPolicy
-diffusion_step: 100
+diffusion_step: 40
 diffusion_stage_num: 5
 input_traj_cnn_size: 16
 input_traj_transformer_size: 10
@@ -31,10 +31,10 @@ mode: "parallel_v2"
 profile_mode: "flashinfer"
 verbose: 0
 
-req_interval: 0.1362
-worker_num: 3
+req_interval: 0.06265220
+worker_num: 4
 query_interval: 1
-model: "diffusion_transformer"
+model: "openvla"
 enable_slice: False
 
 trail_num: 20
