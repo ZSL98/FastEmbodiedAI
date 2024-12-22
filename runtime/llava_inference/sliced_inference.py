@@ -27,7 +27,7 @@ from x_transformers.attend import Intermediates
 class LLaVa_sliced_engine:
     def __init__(self, sche_plan):
         self.text_max_seq_len = 256
-        self.input_seq_len = args.input_seq_len + 576 + 6
+        self.input_seq_len = args.input_seq_len + 576
 
         self.sche_plan = sche_plan
         # self.task_plan = task_plan

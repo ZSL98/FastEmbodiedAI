@@ -44,7 +44,7 @@ class OpenVLA_engine:
     def __init__(self, idx = 0):
         self.idx = idx
         self.text_max_seq_len = 256
-        self.input_seq_len = args.input_seq_len + 512   #text length + vision latent length=256*2
+        self.input_seq_len = args.input_seq_len + 512 + 6   #text length + vision latent length=256*2
         self.n_replica = 1
         if args.mode == 'parallel_v2':
             self.n_replica = args.worker_num
@@ -74,7 +74,7 @@ class OpenVLA_engine:
         print("Generation params: %e" % sum(p.numel() for p in llm.parameters()))
 
         # prepare some streams to use
-        self.streams = [torch.cuda.Stream() for _ in range(36)]
+        self.streams = [torch.cuda.Stream() for _ in range(256)]
 
         # prepare cuda graphs
         self.graphs = {'vit1': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
@@ -326,7 +326,7 @@ class OpenVLA_engine:
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         start = time.time()
-        scale = 5
+        scale = 6
         thread_V = threading.Thread(target=self.run_V_cuda_graphs, args=(num_trails*scale, 
                                                                         False, 0, 
                                                                         self.streams[0], 
@@ -361,7 +361,7 @@ class OpenVLA_engine:
         print(durations)
         assert durations[0] > durations[1], "V is finished before L, adjust the scale in run_V_cuda_graphs()"
 
-        return durations[1]
+        return durations[1]/1000
 
     def run_parallel_req(self, num_trails):
 

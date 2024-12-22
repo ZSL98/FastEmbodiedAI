@@ -57,7 +57,7 @@ class LLaVa_engine:
         print("Generation params: %e" % sum(p.numel() for p in llm.parameters()))
 
         # prepare some streams to use
-        self.streams = [torch.cuda.Stream() for _ in range(36)]
+        self.streams = [torch.cuda.Stream() for _ in range(256)]
 
         # prepare cuda graphs
         self.graphs = {'encode': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
@@ -311,7 +311,7 @@ class LLaVa_engine:
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         start = time.time()
-        scale = 6
+        scale = 20
         thread_V = threading.Thread(target=self.run_V_cuda_graphs, args=(num_trails*scale, 
                                                                         False, 0, 
                                                                         self.streams[0], 
@@ -346,7 +346,7 @@ class LLaVa_engine:
         print(durations)
         assert durations[0] > durations[1], "V is finished before L, adjust the scale in run_V_cuda_graphs()"
 
-        return durations[1]
+        return durations[1]/1000
 
     def run_parallel_req(self, num_trails):
 

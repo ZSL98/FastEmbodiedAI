@@ -31,8 +31,8 @@ mode: "parallel_v2"
 profile_mode: "flashinfer"
 verbose: 0
 
-req_interval: 0.06265220
-worker_num: 4
+req_interval: 0.08582000
+worker_num: 16
 query_interval: 1
 model: "openvla"
 enable_slice: False

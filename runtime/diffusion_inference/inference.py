@@ -82,7 +82,7 @@ class Diffusion_engine:
                        'backbone': backbone}
 
         # prepare some streams to use
-        self.streams = [torch.cuda.Stream() for _ in range(36)]
+        self.streams = [torch.cuda.Stream() for _ in range(256)]
 
         # prepare cuda graphs
         self.graphs = {'resnet': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
@@ -160,6 +160,8 @@ class Diffusion_engine:
                     with torch.cuda.stream(ths_stream):
                         for _ in range(slice_list[id]):
                             self.graphs['backbone'][id].replay()
+                for ths_stream in stream:
+                    ths_stream.synchronize()
             if end_event is not None:
                 end_event.record()
                     
@@ -230,7 +232,7 @@ class Diffusion_engine:
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         start = time.time()
-        scale = 25
+        scale = 200
         thread_V = threading.Thread(target=self.run_V_cuda_graphs, args=(num_trails*scale, 
                                                                         False, 0, 
                                                                         self.streams[0], 
