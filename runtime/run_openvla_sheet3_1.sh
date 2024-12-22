@@ -8,7 +8,7 @@ fi
 
 MODEL_NAME="$1"
 
-CONFIG_FILES=("config_seq.yaml" "config_ours.yaml")
+CONFIG_FILES=("config_ours.yaml")
 
 if [ "$MODEL_NAME" == "openvla" ]; then
     # 循环遍历每个配置文件，并修改 decode_len
@@ -73,8 +73,8 @@ done
 
 # 如果 MODEL 是 LLM，则进行进一步的修改
 if [[ "$MODEL_NAME" == "openvla" || "$MODEL_NAME" == "llava" ]]; then
-    for generation_slice_num in 1 2 4 5 10 20
-    # for generation_slice_num in 10 20
+    # for generation_slice_num in 1 2 4 5 10 20
+    for generation_slice_num in 1 2 3 4 5 6
     do
         # 循环遍历每个配置文件，并修改 generation_slice_num
         for file in "${CONFIG_FILES[@]}"
@@ -144,7 +144,8 @@ if [[ "$MODEL_NAME" == "openvla" || "$MODEL_NAME" == "llava" ]]; then
     done
 # 如果 MODEL 是 diffusion，则进行进一步的修改
 elif [[ "$MODEL_NAME" == "diffusion_cnn" || "$MODEL_NAME" == "diffusion_transformer" ]]; then
-    for diffusion_stage_num in 1 2 4 5 10 20
+    # for diffusion_stage_num in 1 2 4 5 10 20
+    for diffusion_stage_num in 1 2 3 4 5 6
     do
         # 修改每个配置文件中的 diffusion_stage_num
         for file in "${CONFIG_FILES[@]}"

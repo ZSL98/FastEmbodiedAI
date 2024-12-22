@@ -138,7 +138,7 @@ class OpenVLA_engine:
         print("====== Graph for DINOv2 generated ======")
 
         self.vit2_out = {}
-        for graph_id in range(self.n_replica):
+        for graph_id in range(self.n_replica_V):
             with torch.cuda.graph(self.graphs['vit2'][graph_id], stream=self.streams[self.n_replica_L*2 + self.n_replica_V + graph_id]):
                 self.vit2_out[graph_id] = self.models['vit2'](self.caches['img'][graph_id])
         torch.cuda.synchronize()
