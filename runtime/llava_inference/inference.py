@@ -31,10 +31,14 @@ class LLaVa_engine:
         self.text_max_seq_len = 256
         self.input_seq_len = args.input_seq_len + 576 + 10
         self.n_replica = 1
+        self.n_replica_L = self.n_replica
+        self.n_replica_V = self.n_replica
         if args.mode == 'parallel_v2':
             self.n_replica = args.worker_num
         elif args.mode == 'ours':
             self.n_replica = max(args.perception_slice_num, args.generation_slice_num)
+            self.n_replica_V= args.perception_slice_num
+            self.n_replica_L= args.generation_slice_num
             args.perception_scale = args.perception_scale / args.perception_slice_num
             args.generation_scale = args.generation_scale / args.generation_slice_num
         print("self.n_replica: ", self.n_replica)
@@ -60,9 +64,9 @@ class LLaVa_engine:
         self.streams = [torch.cuda.Stream() for _ in range(256)]
 
         # prepare cuda graphs
-        self.graphs = {'encode': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
-                        'prefill': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
-                        'decode': [torch.cuda.CUDAGraph() for i in range(self.n_replica)]}
+        self.graphs = {'encode': [torch.cuda.CUDAGraph() for i in range(self.n_replica_V)],
+                        'prefill': [torch.cuda.CUDAGraph() for i in range(self.n_replica_L)],
+                        'decode': [torch.cuda.CUDAGraph() for i in range(self.n_replica_L)]}
         self.generate_cuda_graphs()
         self.ours_graphs = {}
 
@@ -90,8 +94,8 @@ class LLaVa_engine:
         del new_cache
         self.out1 = {}
         self.new_cache1 = {}
-        for graph_id in range(self.n_replica):
-            with torch.cuda.graph(self.graphs['prefill'][graph_id], stream=self.streams[self.n_replica + graph_id]):
+        for graph_id in range(self.n_replica_L):
+            with torch.cuda.graph(self.graphs['prefill'][graph_id], stream=self.streams[self.n_replica_L + graph_id]):
                 self.out1[graph_id], self.new_cache1[graph_id] = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][graph_id], 
                                                                                     seq_len = self.text_max_seq_len,
                                                                                     kv_cache = None)
@@ -110,7 +114,7 @@ class LLaVa_engine:
         del new_cache
         self.out2 = {}
         self.new_cache2 = {}
-        for graph_id in range(self.n_replica):
+        for graph_id in range(self.n_replica_L):
             with torch.cuda.graph(self.graphs['decode'][graph_id], stream=self.streams[graph_id]):
                self.out2[graph_id], self.new_cache2[graph_id] = self.models['llm'].wrapped_decoder.make_graph(
                         self.caches['single_token'][graph_id], 
@@ -122,8 +126,8 @@ class LLaVa_engine:
 
         ## Make cuda graph for the vision encoder
         self.vit_out = {}
-        for graph_id in range(self.n_replica):
-            with torch.cuda.graph(self.graphs['encode'][graph_id], stream=self.streams[self.n_replica*2 + graph_id]):
+        for graph_id in range(self.n_replica_V):
+            with torch.cuda.graph(self.graphs['encode'][graph_id], stream=self.streams[self.n_replica_L*2 + graph_id]):
                 self.vit_out[graph_id] = self.models['vit'](self.caches['img'][graph_id])
                 # print("out shape: ", out.shape)
         torch.cuda.synchronize()
