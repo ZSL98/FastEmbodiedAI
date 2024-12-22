@@ -35,6 +35,8 @@ class LLaVa_engine:
         self.n_replica_V = self.n_replica
         if args.mode == 'parallel_v2':
             self.n_replica = args.worker_num
+            self.n_replica_L = self.n_replica
+            self.n_replica_V = self.n_replica
         elif args.mode == 'ours':
             self.n_replica = max(args.perception_slice_num, args.generation_slice_num)
             self.n_replica_V= args.perception_slice_num
