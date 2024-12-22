@@ -4,11 +4,11 @@ prefill_n: 1
 decode_n: 1
 encoder_len: 1
 prefill_len: 1
-decode_len: 6
+decode_len: 10
 
 # For DiffusionPolicy
-diffusion_step: 100
-diffusion_stage_num: 5
+diffusion_step: 40
+diffusion_stage_num: 20
 input_traj_cnn_size: 16
 input_traj_transformer_size: 10
 input_img_num: 4        #[1, 2, 4]
@@ -21,20 +21,20 @@ global_cond_dim: 548    #[132, 274, 548]
 # For scaling
 perception_scale: 1.0
 generation_scale: 1.0
-perception_slice_num: 2  # only for LLMs
-generation_slice_num: 4  # only for LLMs
+perception_slice_num: 16  # only for LLMs
+generation_slice_num: 1  # only for LLMs
 diffusion_slice_skewness: 0
 
 simu_ts_len: 500
 real_run: True
-mode: "decouple"
+mode: "ours"
 profile_mode: "flashinfer"
 verbose: 0
 
 req_interval: 0.1362
-worker_num: 3
+worker_num: 1
 query_interval: 1
-model: "diffusion_cnn"
+model: "diffusion_transformer"
 enable_slice: False
 
 trail_num: 20
