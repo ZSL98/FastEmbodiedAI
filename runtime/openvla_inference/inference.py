@@ -491,6 +491,7 @@ class OpenVLA_engine:
 
         elif mode == 'parallel_v2':
             durations, total_duration = self.run_parallel_req_v2(num_trails=num_trails)
+            print(durations)
             print("Query latency: {:.3f} ms".format(np.mean(durations)))
             print("Query duration: {:.3f}".format(total_duration*1000/num_trails))
             print("Throughput: {:.3f}".format(1/(total_duration/num_trails)))
