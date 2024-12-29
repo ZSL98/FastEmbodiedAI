@@ -321,6 +321,9 @@ if __name__ == "__main__":
             elif args.model == "diffusion_cnn":
                 from diffusion_inference.inference import diffusion_run
                 profile_data = diffusion_run(sche_plan = sche_plan, mode = args.mode, model_type = 'cnn')
+            elif args.model == "tinyvla":
+                from tinyvla_inference.inference import diffusion_run
+                profile_data = diffusion_run(sche_plan = sche_plan, mode = args.mode)
 
             if args.mode == "profile":
                 s.data_analyze(sche_plan, profile_data)

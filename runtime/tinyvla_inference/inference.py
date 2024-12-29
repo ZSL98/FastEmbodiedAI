@@ -14,8 +14,8 @@ from torch.multiprocessing import Process, Value, Array
 import torch.cuda.profiler as profiler
 # from cuda import cuda, cudart
 
-from ..llava_inference.llm.model import llama
-from ..llava_inference.encoder.model import vision_transformer
+from llava_inference.llm.model import llama
+from llava_inference.encoder.model import vision_transformer
 from .transformer.model import DiffusionTransformer
 from .cnn.model import DiffusionCNN
 from diffusion_policy.common.pytorch_util import split_with_skew, split_with_skew_no_acc
@@ -37,6 +37,8 @@ class Diffusion_engine:
                  idx = 0,
                  model_type='transformer'):
         self.idx = idx
+        self.text_max_seq_len = 256
+        self.input_seq_len = 256
 
         args.diffusion_step = int(args.generation_scale * args.diffusion_step)
         # prepare caches for tensors
@@ -49,46 +51,49 @@ class Diffusion_engine:
         
         obs_num = 2
         # assert args.input_img_num*obs_num*args.perception_scale%1 == 0, "DiffusionPolicy Perception scaling warning"
-        img = [torch.randn(int(args.input_img_num*obs_num*args.perception_scale), 3, args.input_img_size, args.input_img_size).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
+        text = [torch.randint(0, 256, (1, self.input_seq_len)).to("cuda") for i in range(self.n_replica)]
+        img = [torch.randn(1, 3, 224, 224).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
         if model_type == 'transformer':
             trajectory = [torch.randn(1, args.input_traj_transformer_size, args.input_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
-            cond = [torch.randn(1, obs_num, args.cond_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
+            cond = [torch.randn(1, obs_num, 1024).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
         elif model_type == 'cnn':
             trajectory = [torch.randn(1, args.input_traj_cnn_size, args.input_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]
-            cond = [torch.randn(1, obs_num*args.cond_dim).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]     
+            cond = [torch.randn(1, obs_num*1024).to(torch.bfloat16).to("cuda") for i in range(self.n_replica)]     
         timestep = [torch.tensor(0, dtype=torch.long, device="cuda") for i in range(self.n_replica)]
-        self.caches = { 'img': img,
+        self.caches = { 'text': text,
+                        'img': img,
                         'trajectory': trajectory,
                         'timestep': timestep,
                         'cond': cond}
 
         # prepare models
-        vit = vision_transformer(scaling=args.perception_scale).to("cuda")
-        llm = llama(scaling=args.generation_scale).to("cuda")
+        vit = vision_transformer(scaling=0.5).to("cuda")
+        llm = llama(dim=1024, scaling=0.5).to("cuda")
         if model_type == 'transformer':
             backbone = DiffusionTransformer(
                 input_dim=args.input_dim,
                 output_dim=args.input_dim,
-                cond_dim=args.cond_dim,
+                cond_dim=1024,
                 n_emb=args.n_emb
             ).to(torch.bfloat16).to("cuda")
         elif model_type == 'cnn':
             backbone = DiffusionCNN(
                 input_dim=args.input_dim,
-                global_cond_dim=args.global_cond_dim
+                global_cond_dim=1024
             ).to(torch.bfloat16).to("cuda")
         
-        print("Perception params: %e" % sum(p.numel() for p in vit.parameters())+sum(p.numel() for p in llm.parameters()))
+        print("Perception params: %e" % (sum(p.numel() for p in vit.parameters())+sum(p.numel() for p in llm.parameters())))
         print("Generation params: %e" % sum(p.numel() for p in backbone.parameters()))
 
-        self.models = {'resnet': resnet,
+        self.models = {'vit': vit,
+                       'llm': llm,
                        'backbone': backbone}
 
         # prepare some streams to use
         self.streams = [torch.cuda.Stream() for _ in range(256)]
 
         # prepare cuda graphs
-        self.graphs = {'resnet': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
+        self.graphs = {'encoder': [torch.cuda.CUDAGraph() for i in range(self.n_replica)],
                         'backbone': [torch.cuda.CUDAGraph() for i in range(self.n_replica)]}
         self.generate_cuda_graphs()
         self.ours_graphs = {}
@@ -97,13 +102,23 @@ class Diffusion_engine:
     def generate_cuda_graphs(self):
 
         ## Make cuda graph for the vision encoder
-        self.resnet_out = self.models['resnet'](self.caches['img'][0])
-        self.resnet_out = {}
+        encoder_out = self.models['vit'](self.caches['img'][0])
+        out, new_cache = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][0], 
+                                                                    seq_len = self.text_max_seq_len, 
+                                                                    kv_cache = None)
+        del encoder_out, out, new_cache
+        self.encoder_out = {}
+        self.out1 = {}
+        self.new_cache1 = {}
         for graph_id in range(self.n_replica):
-            with torch.cuda.graph(self.graphs['resnet'][graph_id], stream=self.streams[graph_id]):
-                self.resnet_out = self.models['resnet'](self.caches['img'][graph_id])
+            with torch.cuda.graph(self.graphs['encoder'][graph_id], stream=self.streams[graph_id]):
+                self.encoder_out[graph_id] = self.models['vit'](self.caches['img'][graph_id])
+                self.out1[graph_id], self.new_cache1[graph_id] = self.models['llm'].wrapped_decoder.make_graph(self.caches['text'][graph_id], 
+                                                                                    seq_len = self.text_max_seq_len,
+                                                                                    kv_cache = None)
+
         torch.cuda.synchronize()
-        print("====== Graph for resnet generated ======")
+        print("====== Graph for encoder generated ======")
 
         self.backbone_out = self.models['backbone'](self.caches['trajectory'][0], self.caches['timestep'][0], self.caches['cond'][0])
         self.backbone_out = {}
@@ -119,7 +134,7 @@ class Diffusion_engine:
 
     def run_cuda_graphs(self, num_trails):
         for i in range(num_trails):
-            self.graphs['resnet'][0].replay()
+            self.graphs['encoder'][0].replay()
             for diffusion_step in range(args.diffusion_step):
                 self.graphs['backbone'][0].replay()
         torch.cuda.synchronize()
@@ -133,7 +148,7 @@ class Diffusion_engine:
             if start_event is not None:
                 start_event.record(stream)
             for i in range(num_trails):
-                self.graphs['resnet'][graph_id].replay()
+                self.graphs['encoder'][graph_id].replay()
                 if required_sync:
                     torch.cuda.synchronize()
             if end_event is not None:
@@ -334,11 +349,18 @@ class Diffusion_engine:
                        num_trails: int,
                        sche_plan,
                        ):
+        import torch.profiler
         if mode == 'seq' and use_cuda_graphs:
             durations = []
-            for i in range(num_trails):
-                self.run_single_request(durations, 0)
-            torch.cuda.synchronize()
+            with torch.profiler.profile( 
+                activities=[ 
+                torch.profiler.ProfilerActivity.CPU, 
+                torch.profiler.ProfilerActivity.CUDA]
+            ) as profiler:
+                for i in range(num_trails):
+                    self.run_single_request(durations, 0)
+                torch.cuda.synchronize()
+            profiler.export_chrome_trace("profile_trace.json")
             print("Query duration: {:.2f} ms".format(np.mean(durations)*1000))
             print("Throughput: {:.3f}".format(1/np.mean(durations)))
 
@@ -384,11 +406,11 @@ class Diffusion_engine:
                 if i == args.warmup_num:
                     start_event.record()
 
-                # First execute the encoder (resnet18), then synchronize,
+                # First execute the encoder, then synchronize,
                 # then run multiple diffusion iterations in parallel
                 with torch.cuda.stream(self.streams[0]):
-                    self.graphs['resnet'][0].replay()
-                torch.cuda.synchronize()
+                    self.graphs['encoder'][0].replay()
+                # torch.cuda.synchronize()
                 
                 backbone_streams = []
                 # print("slice_list: ", slice_list)
