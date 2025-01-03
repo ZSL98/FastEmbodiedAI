@@ -37,7 +37,7 @@ elif [ "$MODEL_NAME" == "diffusion_cnn" ]; then
     for file in "${CONFIG_FILES[@]}"
     do
     if [ -f "$file" ]; then
-        sed -i "s/diffusion_step: [0-9]\+/diffusion_step: 40/" $file
+        sed -i "s/diffusion_step: [0-9]\+/diffusion_step: 100/" $file
         sed -i "s/diffusion_stage_num: [0-9]\+/diffusion_stage_num: 5/" $file
         echo "Updated diffusion_step to 40 in $file"
     else
